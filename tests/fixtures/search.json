@@ -1,0 +1,28 @@
+{
+  "page": 1,
+  "lastpage": 1,
+  "total": 2,
+  "applist": [
+    {
+      "appID": "fake-application-1",
+      "regNumber": "000000000001",
+      "status": "წარმოება დასრულებულია",
+      "statusId": "10",
+      "webTransact": "უფლების რეგისტრაცია",
+      "appRegDate": "1758196800",
+      "lastActDate": "1758369600",
+      "applicants": ["Synthetic fixture"],
+      "address": "Synthetic fixture"
+    },
+    {
+      "appID": "fake-application-2",
+      "regNumber": "000000000002",
+      "documentId": "fake-document-2",
+      "status": "განხილვაშია",
+      "statusId": "1",
+      "webTransact": "ცვლილება",
+      "appRegDate": "1758283200",
+      "lastActDate": "1758369600"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "document-tracker",
+  "version": "1.0.0",
+  "description": "Persistent my.gov.ge service 176 registry update tracker",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "start": "node tracker.mjs once",
+    "track": "node tracker.mjs loop"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "dependencies": {
+    "playwright": "^1.63.0"
+  }
+}
