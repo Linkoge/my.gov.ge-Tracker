@@ -1,0 +1,289 @@
+import assert from 'node:assert/strict';
+import { execFile, spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { request } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { promisify } from 'node:util';
+import { validateIdentifierInput } from '../config.mjs';
+import { loadRuntime } from '../runtime.mjs';
+import { StateStore, targetKey } from '../state-store.mjs';
+import { runLoop, runOnce } from '../tracking.mjs';
+import { createApp } from '../ui-server.mjs';
+
+const entry = { key: 'k1', date: '2025-09-20T12:00:00.000Z', description: 'd', status: 's', registrationNumber: '1' };
+const samples = {
+  cadastral: { type: 'cadastral', value: '01.14.16.007.381' },
+  id: { type: 'id', value: '01234567890' },
+  registration: { type: 'registration', value: '882022123456' },
+};
+const quiet = { log() {}, error() {} };
+
+async function start(t, { env = {}, search, fetchImpl, tracked } = {}) {
+  const dir = await mkdtemp(join(tmpdir(), 'mygov-ui-test-'));
+  const configPath = join(dir, 'tracked.json');
+  if (tracked) await writeFile(configPath, JSON.stringify(tracked));
+  const searched = [];
+  const app = createApp({
+    configPath, dataDir: join(dir, 'data'), port: 0, logger: quiet, fetchImpl,
+    env: { TRACKER_ENV_FILE: '/dev/null', ...env },
+    search: search ?? (async target => { searched.push(target); return [entry]; }),
+  });
+  await app.listen();
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const get = async path => (await fetch(app.url + path)).text();
+  const csrf = async () => (await get('/')).match(/name="_csrf" value="([0-9a-f]+)"/)?.[1]
+    ?? (await get('/new')).match(/name="_csrf" value="([0-9a-f]+)"/)[1];
+  const post = async (path, fields = {}, { token } = {}) => fetch(app.url + path, {
+    method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ _csrf: token ?? await csrf(), ...fields }),
+  });
+  const listed = async () => JSON.parse(await readFile(configPath, 'utf8').catch(() => '{"identifiers":[]}')).identifiers;
+  return { app, dir, configPath, dataDir: join(dir, 'data'), searched, get, post, listed, store: new StateStore(join(dir, 'data')) };
+}
+
+test('adding each identifier type saves it and runs a silent baseline check', async t => {
+  const messages = [];
+  const h = await start(t, { fetchImpl: async (url, init) => { messages.push(JSON.parse(init.body).text); return { ok: true, json: async () => ({ ok: true }) }; },
+    env: { TELEGRAM_BOT_TOKEN: 'env-tok-1', TELEGRAM_CHAT_ID: '42' } });
+  for (const [type, sample] of Object.entries(samples)) {
+    const response = await h.post('/track/add', { ...sample, label: `my ${type}` });
+    assert.equal(response.status, 303);
+    await h.app.idle();
+  }
+  assert.deepEqual(h.searched.map(({ type, value }) => ({ type, value })), Object.values(samples));
+  assert.deepEqual(await h.listed(), Object.values(samples).map(s => ({ type: s.type, value: s.value, label: `my ${s.type}` })));
+  assert.equal(JSON.stringify(await h.listed()).includes('undefined'), false);
+  const state = await h.store.read();
+  for (const sample of Object.values(samples)) assert.equal(state.targets[targetKey(sample)].baselineDate, entry.date);
+  assert.deepEqual(messages, []);
+  const page = await h.get('/');
+  for (const sample of Object.values(samples)) assert.ok(page.includes(sample.value));
+  assert.match(page, /active/);
+  assert.match(page, /Check now/);
+  assert.match(page, /Latest entry/);
+});
+
+test('invalid input, unknown types, duplicates and forged requests are rejected', async t => {
+  const h = await start(t);
+  const bad = [
+    ['cadastral', '01.14.16'], ['cadastral', 'abc'], ['cadastral', ''], ['id', '123'], ['id', '1234567890a'],
+    ['registration', '12'], ['registration', 'a b c d e f'], ['bogus', '123456789'], ['toString', 'x'],
+  ];
+  for (const [type, value] of bad) {
+    const response = await h.post('/track/add', { type, value });
+    assert.equal(response.status, 400, `${type} ${value}`);
+  }
+  assert.equal((await h.post('/track/add', { ...samples.id, label: 'x'.repeat(101) })).status, 400);
+  assert.deepEqual(await h.listed(), []);
+  assert.equal((await h.post('/track/add', samples.id)).status, 303);
+  assert.equal((await h.post('/track/add', samples.id)).status, 400);
+  assert.equal((await h.listed()).length, 1);
+  await h.app.idle();
+  // Missing/incorrect form token and foreign Host/Origin headers.
+  assert.equal((await h.post('/track/add', samples.cadastral, { token: 'wrong' })).status, 403);
+  const cross = await fetch(h.app.url + '/track/add', { method: 'POST', headers: { origin: 'http://evil.example', 'content-type': 'application/x-www-form-urlencoded' }, body: '' });
+  assert.equal(cross.status, 403);
+  const status = await new Promise((resolve, reject) => {
+    const { port } = h.app.server.address();
+    request({ host: '127.0.0.1', port, path: '/', headers: { host: 'evil.example' } }, res => { res.resume(); resolve(res.statusCode); }).on('error', reject).end();
+  });
+  assert.equal(status, 403);
+  assert.deepEqual(await h.listed(), [samples.id]);
+  for (const [type, value] of [['cadastral', '01.14.16.007.381'], ['cadastral', '01.14.16.007.381.01.500'], ['id', '123456789'], ['registration', 'AB-12345/6']]) {
+    assert.equal(validateIdentifierInput(type, ` ${value} `), value);
+  }
+});
+
+test('the server only binds to loopback', async t => {
+  assert.throws(() => createApp({ host: '0.0.0.0', search: async () => [] }), /loopback/);
+  const h = await start(t);
+  assert.equal(h.app.server.address().address, '127.0.0.1');
+});
+
+test('scheduler skips paused items and picks up UI changes without a restart', async t => {
+  const h = await start(t, { tracked: { identifiers: [samples.cadastral, samples.id], intervalMinutes: 5 } });
+  const cycles = [];
+  const controller = new AbortController();
+  let sleeps = 0;
+  const loop = h.app.startScheduler(controller.signal, { sleep: async () => {
+    cycles.push(h.searched.splice(0).map(t => t.type));
+    sleeps++;
+    if (sleeps === 1) {
+      assert.equal((await h.post('/track/pause', samples.id)).status, 303);
+      assert.equal((await h.post('/track/add', samples.registration)).status, 303);
+      await h.app.idle();
+      h.searched.splice(0);
+    }
+    if (sleeps === 2) assert.equal((await h.post('/track/resume', samples.id)).status, 303);
+    if (sleeps === 3) controller.abort();
+  } });
+  await loop;
+  assert.deepEqual(cycles[0], ['cadastral', 'id']);
+  assert.deepEqual(cycles[1], ['cadastral', 'registration']);
+  assert.deepEqual(cycles[2], ['cadastral', 'id', 'registration']);
+  const paused = (await h.listed()).filter(t => t.paused);
+  assert.deepEqual(paused, []);
+});
+
+test('pausing is stored, shown, and skipped by runOnce; Check now still works', async t => {
+  const h = await start(t, { tracked: { identifiers: [samples.cadastral, samples.id] } });
+  await h.post('/track/pause', samples.id);
+  assert.deepEqual((await h.listed())[1], { ...samples.id, paused: true });
+  assert.match(await h.get('/'), /paused/);
+  const config = await loadRuntime({ env: { TRACKER_ENV_FILE: '/dev/null' }, configPath: h.configPath, dataDir: h.dataDir });
+  const seen = [];
+  await runOnce({ config, logger: quiet, notify: async () => {}, search: async target => { seen.push(target.type); return [entry]; } });
+  assert.deepEqual(seen, ['cadastral']);
+  await h.post('/track/check', samples.id);
+  await h.app.idle();
+  assert.deepEqual(h.searched.map(t => t.type), ['id']);
+  await h.post('/track/resume', samples.id);
+  assert.deepEqual((await h.listed())[1], samples.id);
+});
+
+test('delete asks for confirmation and removes the tracking and its history', async t => {
+  const h = await start(t, { tracked: { identifiers: [samples.cadastral, samples.id], intervalMinutes: 30 } });
+  await h.post('/track/check', samples.cadastral);
+  await h.app.idle();
+  assert.ok((await h.store.read()).targets[targetKey(samples.cadastral)]);
+  const confirm = await h.get(`/track/delete?type=cadastral&value=${samples.cadastral.value}`);
+  assert.match(confirm, /Delete permanently/);
+  assert.equal((await h.listed()).length, 2);
+  assert.equal((await h.post('/track/delete', samples.cadastral)).status, 303);
+  assert.deepEqual(await h.listed(), [samples.id]);
+  assert.deepEqual((await h.store.read()).targets, {});
+  assert.deepEqual(await h.store.readStatus(), {});
+  assert.equal(JSON.parse(await readFile(h.configPath, 'utf8')).intervalMinutes, 30);
+  assert.equal((await h.post('/track/delete', samples.cadastral)).status, 404);
+});
+
+test('a failed check is shown on the list with its error', async t => {
+  const h = await start(t, { tracked: { identifiers: [samples.cadastral] }, search: async () => { throw new Error('Search timed out'); } });
+  await h.post('/track/check', samples.cadastral);
+  await h.app.idle();
+  const page = await h.get('/');
+  assert.match(page, /Search timed out/);
+  assert.deepEqual((await h.store.read()).targets, {});
+});
+
+test('settings save and load with the bot token masked, stored privately and used by the scheduler', async t => {
+  const tok = `1:${randomBytes(8).toString('hex')}`;
+  const sent = [];
+  const h = await start(t, {
+    env: { TELEGRAM_BOT_TOKEN: 'envtoken1', TELEGRAM_CHAT_ID: '7', TRACKER_INTERVAL_MINUTES: '90' },
+    fetchImpl: async (url, init) => { sent.push({ url, body: JSON.parse(init.body) }); return { ok: true, json: async () => ({ ok: true }) }; },
+  });
+  let page = await h.get('/settings');
+  assert.match(page, /environment \/ \.env/);
+  assert.match(page, /value="90"/);
+  assert.equal((await h.post('/settings', { telegramBotToken: tok, telegramChatId: '555', intervalMinutes: '15' })).status, 303);
+  page = await h.get('/settings');
+  assert.match(page, /Settings saved/);
+  assert.ok(!page.includes(tok), 'token must not be rendered');
+  assert.ok(page.includes(`••••••••${tok.slice(-4)}`));
+  assert.match(page, /value="555"/);
+  assert.match(page, /value="15"/);
+  const file = join(h.dataDir, 'ui-settings.json');
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).telegramBotToken, tok);
+  // UI-saved values beat the environment; the scheduler config shows the same values.
+  const config = await loadRuntime({ env: { TELEGRAM_BOT_TOKEN: 'envtoken1', TELEGRAM_CHAT_ID: '7', TRACKER_INTERVAL_MINUTES: '90', TRACKER_ENV_FILE: '/dev/null' }, configPath: h.configPath, dataDir: h.dataDir, allowEmpty: true });
+  assert.equal(config.settings.TELEGRAM_BOT_TOKEN, tok);
+  assert.equal(config.settings.TELEGRAM_CHAT_ID, '555');
+  assert.equal(config.intervalMinutes, 15);
+  // A blank token keeps the saved one; clearing falls back to the environment.
+  await h.post('/settings', { telegramBotToken: '', telegramChatId: '556', intervalMinutes: '20' });
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).telegramBotToken, tok);
+  await h.post('/settings', { clearTelegram: '1', telegramChatId: '', intervalMinutes: '' });
+  const cleared = JSON.parse(await readFile(file, 'utf8'));
+  assert.equal(cleared.telegramBotToken, undefined);
+  assert.equal(cleared.intervalMinutes, undefined);
+  assert.match(await h.get('/settings'), /value="90"/);
+  assert.deepEqual(sent, []);
+});
+
+test('invalid settings are rejected without changing the saved file', async t => {
+  const h = await start(t);
+  const file = join(h.dataDir, 'ui-settings.json');
+  for (const fields of [
+    { telegramBotToken: 'has space', telegramChatId: '1' }, { telegramBotToken: 'abcde:fghij' },
+    { telegramBotToken: 'abcde:fghij', telegramChatId: 'not a chat' }, { telegramChatId: '555' },
+    { intervalMinutes: '0' }, { intervalMinutes: '10081' }, { intervalMinutes: '1.5' }, { intervalMinutes: 'abc' },
+  ]) {
+    await h.post('/settings', fields);
+    assert.match(await h.get('/settings'), /class="flash error"/, JSON.stringify(fields));
+    await assert.rejects(stat(file));
+  }
+});
+
+test('changing the interval in the UI wakes the sleeping scheduler', async t => {
+  const h = await start(t, { tracked: { identifiers: [samples.cadastral], intervalMinutes: 60 } });
+  const controller = new AbortController();
+  const waits = [];
+  const loop = h.app.startScheduler(controller.signal, { sleep: (ms, _value, { signal }) => {
+    waits.push(ms);
+    return new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+      if (waits.length === 1) h.post('/settings', { intervalMinutes: '10' }).then(() => {});
+      else controller.abort();
+    });
+  } });
+  await loop;
+  assert.equal(waits[0], 3600000);
+  assert.ok(waits[1] <= 600000 && waits[1] > 590000, String(waits[1]));
+});
+
+test('Telegram test message uses saved settings through the mocked HTTP call', async t => {
+  const tok = `2:${randomBytes(8).toString('hex')}`;
+  const calls = [];
+  let reply = { ok: true, json: async () => ({ ok: true }) };
+  const h = await start(t, { fetchImpl: async (url, init) => { calls.push({ url, body: JSON.parse(init.body) }); return reply; } });
+  await h.post('/settings/test');
+  assert.match(await h.get('/settings'), /Save a Telegram bot token and chat ID first/);
+  assert.equal(calls.length, 0);
+  await h.post('/settings', { telegramBotToken: tok, telegramChatId: '321' });
+  await h.post('/settings/test');
+  assert.match(await h.get('/settings'), /Test message sent/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, `https://api.telegram.org/bot${tok}/sendMessage`);
+  assert.equal(calls[0].body.chat_id, '321');
+  assert.match(calls[0].body.text, /test message/);
+  reply = { ok: false, status: 401 };
+  await h.post('/settings/test');
+  const page = await h.get('/settings');
+  assert.match(page, /Telegram notification failed: HTTP 401/);
+  assert.ok(!page.includes(tok));
+});
+
+test('runLoop accepts a loader so each cycle sees fresh options', async () => {
+  const intervals = [3, 4];
+  const waits = [];
+  const controller = new AbortController();
+  let loads = 0;
+  const cycles = await runLoop(async () => ({
+    config: { dataDir: await mkdtemp(join(tmpdir(), 'mygov-loop-')), identifiers: [], intervalMinutes: intervals[loads++] },
+  }), { signal: controller.signal, sleep: async ms => { waits.push(ms); if (waits.length === 2) controller.abort(); } });
+  assert.equal(cycles, 2);
+  assert.deepEqual(waits, [180000, 240000]);
+});
+
+test('CLI prints usage, serves the UI on loopback and rejects non-loopback hosts', { timeout: 30000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'mygov-ui-cli-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const cli = new URL('../ui.mjs', import.meta.url).pathname;
+  const env = { ...process.env, TRACKER_ENV_FILE: '/dev/null', TRACKER_DATA_DIR: join(dir, 'data'), TELEGRAM_BOT_TOKEN: '', TELEGRAM_CHAT_ID: '' };
+  const run = promisify(execFile);
+  assert.match((await run(process.execPath, [cli, '--help'], { env, timeout: 10000 })).stdout, /--port/);
+  await assert.rejects(run(process.execPath, [cli, '--host', '0.0.0.0', '--port', '0'], { env, timeout: 10000 }), error => error.code === 1 && /loopback/.test(error.stderr));
+  const child = spawn(process.execPath, [cli, '--port', '0', '--no-scheduler', '--config', join(dir, 'tracked.json')], { env, stdio: ['ignore', 'pipe', 'inherit'] });
+  t.after(() => child.kill());
+  const url = await new Promise((resolve, reject) => {
+    child.on('exit', code => reject(new Error(`exited ${code}`)));
+    child.stdout.on('data', chunk => { const m = String(chunk).match(/(http:\/\/127\.0\.0\.1:\d+)/); if (m) resolve(m[1]); });
+  });
+  const page = await (await fetch(url)).text();
+  assert.match(page, /Current trackings/);
+});

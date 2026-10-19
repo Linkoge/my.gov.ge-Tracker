@@ -37,15 +37,40 @@ export class StateStore {
     return state;
   }
 
-  async write(state) {
+  async write(state) { await this.writeJson(this.path, state); }
+
+  async writeJson(path, data) {
     const temporary = join(this.dataDir, `.tracker-${randomUUID()}.tmp`);
     const handle = await open(temporary, 'wx', 0o600);
     try {
-      await handle.writeFile(`${JSON.stringify(state, null, 2)}\n`);
+      await handle.writeFile(`${JSON.stringify(data, null, 2)}\n`);
       await handle.sync();
     } finally { await handle.close(); }
-    try { await rename(temporary, this.path); }
+    try { await rename(temporary, path); }
     finally { await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
+  }
+
+  // Drops a deleted identifier's baseline and last-check record; the caller holds the lock.
+  async forget(key) {
+    const state = await this.read();
+    if (Object.hasOwn(state.targets, key)) { delete state.targets[key]; await this.write(state); }
+    const status = await this.readStatus();
+    if (Object.hasOwn(status, key)) { delete status[key]; await this.writeJson(join(this.dataDir, 'check-status.json'), status); }
+  }
+
+  // Display-only record of the latest check per identifier (time, result count, error).
+  // Kept apart from the baseline history so a failed check never touches tracker-state.json.
+  async readStatus() {
+    try {
+      const status = JSON.parse(await readFile(join(this.dataDir, 'check-status.json'), 'utf8'));
+      return isMap(status) ? status : {};
+    } catch { return {}; }
+  }
+
+  async recordStatus(key, entry) {
+    const status = await this.readStatus();
+    status[key] = entry;
+    await this.writeJson(join(this.dataDir, 'check-status.json'), status);
   }
 }
 

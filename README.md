@@ -52,9 +52,31 @@ node tracker.mjs loop --config tracked.json --data-dir /private/path/mygov-data 
 
 `npm start` runs once; `npm run track` runs the loop. Direct Node commands also work when npm is unavailable. SIGINT/SIGTERM stop the loop after the active check finishes; the interval is measured from the end of each cycle. Searches run sequentially. No scheduler or service is installed by these commands. `once` exits 1 when any identifier, state operation or notification fails; loop mode reports errors and retries on the next cycle.
 
+## Web UI
+
+A small local web interface manages trackings and settings and runs the scheduler. It uses only Node built-ins (no extra dependencies):
+
+```sh
+node ui.mjs                      # http://127.0.0.1:8787, scheduler included
+node ui.mjs --port 9000          # another port (or set TRACKER_UI_PORT)
+node ui.mjs --no-scheduler       # manage only; checks run via "Check now"
+```
+
+`npm run ui` is the same as `node ui.mjs`. Options: `--port`, `--host`, `--config tracked.json`, `--data-dir PATH`, `--no-scheduler`. The server binds to `127.0.0.1` by default and **refuses non-loopback hosts** (`127.0.0.1`, `::1`, `localhost` only) because it has no login; it also rejects foreign `Host`/`Origin` headers and requires a per-start form token on every POST. Do not run `ui.mjs` and `tracker.mjs loop` on the same data directory at the same time (the data-directory lock would make one of them report errors).
+
+Pages:
+
+- **Trackings** (`/`): every tracked identifier with type, label, status (active/paused/checking), last check time, last result or error, latest known entry date and result count, plus **Check now**, **Pause/Resume** and **Delete** (with a confirmation page; deleting also removes the saved baseline, so re-adding starts a new silent baseline). Paused items are skipped by the scheduler; "Check now" still works on them.
+- **New tracking** (`/new`): three separate forms for *Cadastral code* (საკადასტრო კოდი, e.g. `01.14.16.007.381`), *Personal ID number* (პირადი ნომერი, 11 digits, or 9 for an organization) and *Application number* (განცხადების ნომერი, 5-25 letters/digits/`-`/`/`), with an optional label. Input is validated per type and duplicates are rejected. Adding saves the identifier and starts a baseline check (current results saved, no alert), exactly like the command-line tracker.
+- **Settings** (`/settings`): Telegram bot token, chat ID, check interval in minutes (1-10080) and a **Send test message** button. After saving, the token is shown masked and the token field is write-only: leave it empty to keep the saved token. Either set both token and chat ID or neither. The interval takes effect without a restart (the sleeping scheduler is woken and recalculates its wait).
+
+Storage: identifiers (plus optional `label` and `paused`) stay in `tracked.json`, the same file the CLI reads, and baselines stay in `DATA_DIR/tracker-state.json`. The UI additionally writes `DATA_DIR/ui-settings.json` (settings, mode 0600) and `DATA_DIR/check-status.json` (last check time/result/error per identifier). All of these are ignored by Git and are never committed. The scheduler (and `tracker.mjs`) reload `tracked.json` and the UI settings before every cycle, so pausing, adding, deleting and settings changes apply without restarting.
+
+**Precedence** for the Telegram bot token, chat ID and check interval: values saved in the UI, then environment variables, then `.env`, then `tracked.json`, then defaults. The settings page shows the effective value and where it comes from, and the scheduler uses exactly those values, including when `tracker.mjs` is run from the command line (a saved UI interval also overrides `--interval-minutes`). To fall back to `.env` values, tick "Remove Telegram values saved in the UI" or clear the interval field and save. Other variables (login, data directory, timeouts, Chrome path) are not editable in the UI.
+
 ## Configuration
 
-Environment variables override local `.env` values. The default `.env` is resolved beside the application, regardless of working directory. `TRACKER_ENV_FILE` can select a different environment file. Optional empty settings use their defaults.
+Environment variables override local `.env` values (and values saved in the [web UI](#web-ui) override both for Telegram and the interval). The default `.env` is resolved beside the application, regardless of working directory. `TRACKER_ENV_FILE` can select a different environment file. Optional empty settings use their defaults.
 
 | Setting | Purpose / default |
 | --- | --- |
@@ -66,8 +88,9 @@ Environment variables override local `.env` values. The default `.env` is resolv
 | `TRACKER_TIMEOUT_MS` | Timeout per browser/API operation, defaults to 15000; maximum 60000 |
 | `CHROME_PATH` | Browser executable, defaults to `/usr/bin/google-chrome` |
 | `TRACKER_ENV_FILE` | Alternate local environment-file path |
+| `TRACKER_UI_PORT`, `TRACKER_UI_HOST` | Web UI port (default 8787) and loopback host (default `127.0.0.1`) |
 
-JSON also accepts `dataDir`, `intervalMinutes` and `timeoutMs`. Precedence: command-line override, environment/local `.env`, JSON, default. Explicit relative config/data paths resolve from the current working directory; default config/data paths resolve beside the application. An absent config is an error; use `--config tracked.example.json` to try the supplied cadastral example.
+JSON also accepts `dataDir`, `intervalMinutes` and `timeoutMs`; each identifier may also have a `label` string and `"paused": true` (skipped by `once` and `loop`; the UI manages both). Precedence: UI-saved settings (Telegram and interval only), command-line override, environment/local `.env`, JSON, default. Explicit relative config/data paths resolve from the current working directory; default config/data paths resolve beside the application. An absent config is an error; use `--config tracked.example.json` to try the supplied cadastral example.
 
 Telegram messages use plain text and contain the identifier, entry date, description, status and application/document identifier when present. Delivery has a 15-second timeout. HTTP errors, malformed responses and Telegram `ok: false` are failures. A partial Telegram configuration is an error. Login/search/parsing failures are logged and sent to Telegram when configured; console fallback reports them locally. Error reports never count as an empty search and do not advance an existing baseline.
 
@@ -106,7 +129,7 @@ The login command can request a verification code and waits up to 60 seconds for
 
 ```sh
 timeout 180s node --test tests/*.test.mjs
-# or: npm test
+# or: npm test (includes the UI tests)
 ```
 
 For the application's fixed Python smoke command:
@@ -116,7 +139,7 @@ python -m pip install -r requirements-dev.txt
 timeout 180s python -m pytest -q -m smoke
 ```
 
-The Python wrappers run the permanent Node suites. Fixtures exercise parsing, activity dates, complete pagination, silent baselines, same-date/newer/backfilled additions, same-ID updates, restart deduplication, notification retries, failure reporting, corrupt state, locking, configuration and loop behavior. Browser tests run Chrome against intercepted synthetic pages, verify all three identifier fields and pagination, and block external page requests. CLI tests use an empty environment file. Tests use disposable directories and fake credentials; they do not log in or send Telegram messages.
+The Python wrappers run the permanent Node suites, including `tests/ui.test.mjs` (adding each identifier type, invalid input, pause/resume in the scheduler, delete, settings with token masking and a mocked Telegram test send, CLI start on loopback). Fixtures exercise parsing, activity dates, complete pagination, silent baselines, same-date/newer/backfilled additions, same-ID updates, restart deduplication, notification retries, failure reporting, corrupt state, locking, configuration and loop behavior. Browser tests run Chrome against intercepted synthetic pages, verify all three identifier fields and pagination, and block external page requests. CLI tests use an empty environment file. Tests use disposable directories and fake credentials; they do not log in or send Telegram messages.
 
 The repository also retains its credential-path guard: `node scripts/check-secrets.mjs`. It checks the Git index and rejects tracked environment files, browser state, keys, cookies or tokens. `.env.example` contains only empty assignments. Keep `.env`, `tracked.json` and the data directory private; default sensitive paths are ignored. If you choose a data directory within the repository under another name, add that path to `.gitignore` before committing.
 

@@ -5,7 +5,8 @@
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "start": "node tracker.mjs once",
-    "track": "node tracker.mjs loop"
+    "track": "node tracker.mjs loop",
+    "ui": "node ui.mjs"
   },
   "keywords": [],
   "type": "commonjs",

@@ -22,6 +22,8 @@ id_ed25519*
 *storage-state*
 *storageState*
 state.json
+ui-settings.json
+check-status.json
 *.log
 *.har
 *.png
