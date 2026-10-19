@@ -1,4 +1,3 @@
-import { chromium } from 'playwright';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { identifierFields, loadLoginConfig, validateTargets } from './config.mjs';
@@ -10,6 +9,8 @@ export const SEARCH_URL = 'https://naprweb.reestri.gov.ge/api/search';
 const iframe = 'iframe[src*="naprweb.reestri.gov.ge"]';
 
 export async function openBrowserContext(config, profileDir = join(config.dataDir, 'browser')) {
+  // Loaded on demand so configuration, the UI and tests that stub the browser work without Playwright installed.
+  const { chromium } = await import('playwright');
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
   const context = await chromium.launchPersistentContext(profileDir, {
     executablePath: config.chromePath, headless: true, args: ['--no-sandbox'],
