@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Install DEPLOY_COMMIT of DEPLOY_REPO into releases/<timestamp>-<commit>/app, install the unit, switch
+# releases/current atomically and restart the user service. Health checking is deploy/health's job.
+# Optional: DEPLOY_PACKAGE_MANAGER (default "npm"), DEPLOY_NODE_MODULES_FROM (fallback dependency source,
+# default $DEPLOY_REPO/node_modules), DEPLOY_KEEP_RELEASES (default 5), DEPLOY_STEP_TIMEOUT_SECONDS (default 600).
+set -euo pipefail
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/common.sh"
+
+DEPLOY_REPO="${DEPLOY_REPO-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+DEPLOY_COMMIT="${DEPLOY_COMMIT-HEAD}"
+[ -n "${DEPLOY_REPO:-}" ] || die "DEPLOY_REPO is required"
+[ -n "${DEPLOY_COMMIT:-}" ] || die "DEPLOY_COMMIT is required"
+case "$DEPLOY_COMMIT" in -*) die "invalid DEPLOY_COMMIT" ;; esac
+sha="$(git -C "$DEPLOY_REPO" rev-parse --verify --quiet "$DEPLOY_COMMIT^{commit}")" || die "unknown commit $DEPLOY_COMMIT"
+
+mkdir -p "$RELEASES_DIR" "$UNIT_DIR" "$PRIVATE_DIR/data"
+chmod 700 "$PRIVATE_DIR" "$PRIVATE_DIR/data"
+exec 9>"$RELEASES_DIR/.deploy.lock"
+flock -n 9 || die "another deploy is running"
+
+read -ra pm <<< "${DEPLOY_PACKAGE_MANAGER:-npm}"
+step_timeout="${DEPLOY_STEP_TIMEOUT_SECONDS:-600}"
+id="$(date -u +%Y%m%d%H%M%S)-${sha:0:12}"
+release="$RELEASES_DIR/$id"
+[ ! -e "$release" ] || die "release $id already exists"
+
+built=0
+cleanup() { if [ "$built" != 1 ]; then rm -rf "${release:?}"; fi; }
+trap cleanup EXIT
+
+previous="$(active_release)"
+mkdir -p "$release/app"
+git -C "$DEPLOY_REPO" archive "$sha" | tar -x -C "$release/app"
+printf 'commit=%s\ncreated_at=%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$release/manifest.env"
+
+app="$release/app"
+grep -q "releases/current/app" "$app/$UNIT_FILE_IN_RELEASE" || die "commit's unit file does not run from releases/current/app"
+
+# True when every runtime dependency pinned in package-lock.json is installed at that version in $2.
+modules_match_lock() {
+  node -e '
+    const fs = require("node:fs"), path = require("node:path");
+    const [lockFile, modules] = process.argv.slice(1);
+    const lock = JSON.parse(fs.readFileSync(lockFile, "utf8"));
+    let ok = true;
+    for (const [key, info] of Object.entries(lock.packages ?? {})) {
+      if (!/^node_modules\/[^/]+$/.test(key) || info.dev) continue;
+      try { ok = ok && JSON.parse(fs.readFileSync(path.join(modules, key.slice(13), "package.json"), "utf8")).version === info.version; }
+      catch { ok = false; }
+    }
+    process.exit(ok ? 0 : 1);
+  ' "$1" "$2" 2>/dev/null
+}
+
+install_dependencies() {
+  local lock="$app/package-lock.json" prev_app="$RELEASES_DIR/$previous/app" source
+  [ -f "$lock" ] || die "commit has no package-lock.json"
+  # 1. The previous release already has exactly these dependencies.
+  if [ -n "$previous" ] && [ -d "$prev_app/node_modules" ] && cmp -s "$lock" "$prev_app/package-lock.json"; then
+    cp -a "$prev_app/node_modules" "$app/node_modules"; log "reused dependencies from release $previous"; return
+  fi
+  # 2. A locked install.
+  if command -v "${pm[0]}" >/dev/null 2>&1; then
+    (cd "$app" && CI=true timeout "$step_timeout" "${pm[@]}" ci --omit=dev) >&2; return
+  fi
+  # 3. No package manager on this host: reuse an existing install that matches the lock exactly.
+  source="${DEPLOY_NODE_MODULES_FROM:-$DEPLOY_REPO/node_modules}"
+  if [ -d "$source" ] && modules_match_lock "$lock" "$source"; then
+    cp -aL "$source" "$app/node_modules"; log "copied dependencies from the checkout"; return
+  fi
+  die "no package manager and no matching node_modules to reuse"
+}
+install_dependencies
+
+built=1
+
+# Install the unit from the release itself, then switch and restart.
+unit_tmp="$UNIT_DIR/.$SERVICE_NAME.$$"
+cp "$app/$UNIT_FILE_IN_RELEASE" "$unit_tmp"
+mv -T "$unit_tmp" "$UNIT_PATH"
+systemctl_user daemon-reload
+switch_current "$id"
+systemctl_user enable "$SERVICE_NAME" >/dev/null 2>&1 || log "warning: could not enable $SERVICE_NAME"
+systemctl_user restart "$SERVICE_NAME"
+
+# Prune only old releases created by this script; never the new, previous or current one.
+keep="${DEPLOY_KEEP_RELEASES:-5}"
+if [[ "$keep" =~ ^[0-9]+$ ]]; then
+  mapfile -t old < <(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{14}-[0-9a-f]{12}' -printf '%f\n' | sort -r | tail -n +"$((keep + 1))")
+  for name in "${old[@]}"; do
+    if [ "$name" != "$id" ] && [ "$name" != "$previous" ]; then rm -rf "${RELEASES_DIR:?}/$name"; fi
+  done
+fi
+echo "deployed $id ($sha)"

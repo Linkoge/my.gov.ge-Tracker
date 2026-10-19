@@ -143,6 +143,17 @@ The Python wrappers run the permanent Node suites, including `tests/ui.test.mjs`
 
 The repository also retains its credential-path guard: `node scripts/check-secrets.mjs`. It checks the Git index and rejects tracked environment files, browser state, keys, cookies or tokens. `.env.example` contains only empty assignments. Keep `.env`, `tracked.json` and the data directory private; default sensitive paths are ignored. If you choose a data directory within the repository under another name, add that path to `.gitignore` before committing.
 
+## Deployment
+
+`.linko-deploy.json` points the application at the scripts in `deploy/`; the application merges and runs them. The tracker runs as the user systemd unit `mygov-tracker.service` (`node ui.mjs`, UI and scheduler on `127.0.0.1:8787`).
+
+- `deploy/deploy` exports `DEPLOY_COMMIT` (default `HEAD`) of `DEPLOY_REPO` into `~/.local/share/mygov-tracker/releases/<id>/app`, installs dependencies (previous release if `package-lock.json` is unchanged, else `npm ci --omit=dev`, else a matching `node_modules` from the checkout), installs the unit from the release, switches `releases/current` atomically and restarts the service. It keeps the newest 5 releases.
+- `deploy/backup` copies the private state (`private/tracked.json`, `private/data/`) and records the active release in `backups/pre-deploy`.
+- `deploy/health` requires the service to be active and `http://127.0.0.1:8787/` to answer 200 with the tracker page (`DEPLOY_HEALTH_URL`, `DEPLOY_HEALTH_WINDOW_SECONDS` to tune).
+- `deploy/rollback` repoints `current` at the recorded release and restarts; `DEPLOY_RESTORE_DATA=1` also restores the backed-up private state.
+
+Identifiers and state live in `~/.local/share/mygov-tracker/private/`, outside every release, so the checkout's `tracked.json`/`data/` are not used by the service. Optional Telegram/login settings go in `~/.config/mygov-tracker/runtime.env` (see `deploy/runtime.env.example`; create it privately, never commit it). Tests: `tests/test_deploy.py` (fake `systemctl`/`curl`/`npm`, disposable directories).
+
 ## Live verification — 2026-10-17 (Asia/Tbilisi)
 
 A bounded Chrome search through the actual service 176 page for `01.14.16.007.381` returned HTTP 200 and **9 applications on 1 page**. Parsing succeeded. The latest activity was **22 December 2022, 19:17:35**, represented by the API as `1671736655` and stored as `2022-12-22T19:17:35.000Z`. The most recent application's registration date was 16 December 2022; the activity date is the tracking baseline.
@@ -151,6 +162,6 @@ The actual `tracker.mjs once` command established this baseline in a disposable 
 
 A separate attempt with the local login credentials reached `/ka-ge/account/login/verification`. Authentication could not complete because a second-factor verification code was required and none was supplied. No explicit send-code click was made. Public service/iframe search still succeeded. This does not establish a fully authenticated account session. Local Telegram variables were empty, so real Telegram delivery was not tested; the delivery protocol and failure paths are covered by permanent fake-response tests.
 
-The final fixed smoke suite passed: **2 Python checks running all 26 permanent Node tests**, including the offline browser tests. Node v22.22.1, Playwright 1.63.0 and `/usr/bin/google-chrome` were used. npm was unavailable on PATH, so direct Node test/run commands were used. No long-running tracker was activated. No deploy setup; merges only.
+The final fixed smoke suite passed: **2 Python checks running all 26 permanent Node tests**, including the offline browser tests. Node v22.22.1, Playwright 1.63.0 and `/usr/bin/google-chrome` were used. npm was unavailable on PATH, so direct Node test/run commands were used. No long-running tracker was activated.
 
 The [earlier investigation](docs/investigation-2026-10-13.md) is historical prototype evidence. Earlier security cleanup found no historical Git objects to audit in this checkout; credentials and old browser artifacts remained local and ignored. The exploratory `inspect.mjs`, `search-probe.mjs`, `api-inspect.mjs` and `send-code.mjs` are retained for investigation; use `tracker.mjs` for tracking.

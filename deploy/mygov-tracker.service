@@ -1,0 +1,20 @@
+# Installed by deploy/deploy. releases/current is an atomically switched symlink to the active release;
+# identifiers and state live in the private directory, outside every release.
+[Unit]
+Description=my.gov.ge tracker web UI and scheduler
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/mygov-tracker/releases/current/app
+# Optional private settings (Telegram, login, interval); see deploy/runtime.env.example. Never stored in Git.
+EnvironmentFile=-%h/.config/mygov-tracker/runtime.env
+Environment=NODE_ENV=production
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/node ui.mjs --host 127.0.0.1 --port 8787 --config %h/.local/share/mygov-tracker/private/tracked.json --data-dir %h/.local/share/mygov-tracker/private/data
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

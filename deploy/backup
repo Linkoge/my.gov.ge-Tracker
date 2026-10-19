@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Record the active release and copy the private state directory (tracked.json, data/) into DEPLOY_BACKUP_DIR.
+# Environment: DEPLOY_BACKUP_DIR (defaults to the deploy root backup directory); optional DEPLOY_PRIVATE_DIR, MYGOV_DEPLOY_ROOT.
+set -euo pipefail
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/common.sh"
+
+[ -n "${DEPLOY_BACKUP_DIR:-}" ] || die "DEPLOY_BACKUP_DIR is required"
+mkdir -p "$DEPLOY_BACKUP_DIR"
+chmod 700 "$DEPLOY_BACKUP_DIR"
+
+previous="$(active_release)"
+
+rm -rf "${DEPLOY_BACKUP_DIR:?}/private.partial"
+if [ -d "$PRIVATE_DIR" ]; then
+  cp -a "$PRIVATE_DIR" "$DEPLOY_BACKUP_DIR/private.partial"
+  # A copied lock names a process that will not exist after a restore.
+  rm -f "$DEPLOY_BACKUP_DIR/private.partial/data/tracker.lock"
+else
+  log "private state directory does not exist yet; recording an empty backup"
+  mkdir "$DEPLOY_BACKUP_DIR/private.partial"
+fi
+rm -rf "${DEPLOY_BACKUP_DIR:?}/private"
+mv "$DEPLOY_BACKUP_DIR/private.partial" "$DEPLOY_BACKUP_DIR/private"
+if [ -r "$UNIT_PATH" ]; then
+  cp -p "$UNIT_PATH" "$DEPLOY_BACKUP_DIR/unit.service"
+else
+  rm -f "$DEPLOY_BACKUP_DIR/unit.service"
+fi
+
+record="$DEPLOY_BACKUP_DIR/record.env.partial"
+{
+  printf 'previous_release=%s\n' "$previous"
+  printf 'private_dir=%s\n' "$PRIVATE_DIR"
+  printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$record"
+mv "$record" "$DEPLOY_BACKUP_DIR/record.env"
+log "backup recorded: previous release '${previous:-none}', private state copied"
