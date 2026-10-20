@@ -66,10 +66,37 @@ test('adding each identifier type saves it and runs a silent baseline check', as
   assert.match(page, /Latest entry/);
 });
 
+test('cadastral codes accept any nonempty text, trim whitespace and reject duplicates', async t => {
+  const h = await start(t);
+  const values = ['82.01.44.932', '01.14.16.007.381', '01.14.16.007.381.01.500', '01.14.16', 'abc', 'arbitrary cadastral / value', 'x'.repeat(80)];
+  const targets = values.map(value => ({ type: 'cadastral', value }));
+  for (const target of targets) {
+    assert.equal(validateIdentifierInput(target.type, ` ${target.value} `), target.value);
+    assert.equal((await h.post('/track/add', { ...target, value: ` ${target.value} ` })).status, 303, target.value);
+    await h.app.idle();
+    const duplicate = await h.post('/track/add', target);
+    assert.equal(duplicate.status, 400);
+    assert.match(await duplicate.text(), /already tracked/);
+  }
+  assert.deepEqual(await h.listed(), targets);
+  assert.deepEqual(h.searched, targets);
+  const page = await h.get('/new');
+  assert.match(page, /placeholder="82\.01\.44\.932 or 01\.14\.16\.007\.381"/);
+  assert.doesNotMatch(page, /Expected: like/);
+  assert.doesNotMatch(page.match(/<input[^>]+id="v-cadastral"[^>]*>/)[0], /maxlength|pattern=/);
+  for (const value of ['', '   ', '\t\n']) {
+    assert.throws(() => validateIdentifierInput('cadastral', value), /Invalid cadastral value; enter a nonempty value/);
+    const response = await h.post('/track/add', { type: 'cadastral', value });
+    assert.equal(response.status, 400);
+    assert.doesNotMatch(await response.text(), /expected like/i);
+  }
+  assert.deepEqual(await h.listed(), targets);
+});
+
 test('invalid input, unknown types, duplicates and forged requests are rejected', async t => {
   const h = await start(t);
   const bad = [
-    ['cadastral', '01.14.16'], ['cadastral', 'abc'], ['cadastral', ''], ['id', '123'], ['id', '1234567890a'],
+    ['cadastral', ''], ['id', '123'], ['id', '1234567890a'],
     ['registration', '12'], ['registration', 'a b c d e f'], ['bogus', '123456789'], ['toString', 'x'],
   ];
   for (const [type, value] of bad) {

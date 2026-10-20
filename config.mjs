@@ -36,16 +36,19 @@ export const identifierFields = Object.freeze({ cadastral: 'cadcode', id: 'perso
 
 export const defaultConfigPath = resolve(root, 'tracked.json');
 
-// Basic per-type shapes enforced when the UI adds an identifier. tracked.json stays lenient.
+// ID and registration shapes enforced by the UI. Cadastral values only need to be nonempty.
 export const identifierFormats = Object.freeze({
-  cadastral: { pattern: /^\d{2}\.\d{2}\.\d{2}\.\d{3}\.\d{3}(?:\.\d{2,3}){0,2}$/, hint: 'like 01.14.16.007.381' },
   id: { pattern: /^(?:\d{9}|\d{11})$/, hint: '11 digits (9 for an organization)' },
   registration: { pattern: /^[0-9A-Za-z][0-9A-Za-z/-]{4,24}$/, hint: '5-25 letters, digits, "-" or "/"' },
 });
 
 export function validateIdentifierInput(type, value) {
-  if (!Object.hasOwn(identifierFormats, type)) throw new Error('Unknown identifier type');
+  if (!Object.hasOwn(identifierFields, type)) throw new Error('Unknown identifier type');
   const text = typeof value === 'string' ? value.trim() : '';
+  if (type === 'cadastral') {
+    if (!text) throw new Error('Invalid cadastral value; enter a nonempty value');
+    return text;
+  }
   if (!identifierFormats[type].pattern.test(text)) throw new Error(`Invalid ${type} value; expected ${identifierFormats[type].hint}`);
   return text;
 }

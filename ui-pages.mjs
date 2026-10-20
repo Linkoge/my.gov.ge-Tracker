@@ -2,7 +2,7 @@ import { identifierFormats } from './config.mjs';
 import { maskSecret } from './ui-settings.mjs';
 
 export const typeNames = Object.freeze({
-  cadastral: { en: 'Cadastral code', ka: 'საკადასტრო კოდი', example: '01.14.16.007.381' },
+  cadastral: { en: 'Cadastral code', ka: 'საკადასტრო კოდი', example: '82.01.44.932 or 01.14.16.007.381' },
   id: { en: 'Personal ID number', ka: 'პირადი ნომერი', example: '01234567890' },
   registration: { en: 'Application number', ka: 'განცხადების ნომერი', example: '882022123456' },
 });
@@ -59,8 +59,8 @@ export function trackingsPage({ rows, csrf, problem }) {
 export function newPage({ csrf, values = {}, error }) {
   const forms = Object.entries(typeNames).map(([type, n]) => `<div class="card"><h3>${n.en}<br><span class="muted">${n.ka}</span></h3>
 <form method="post" action="/track/add"><input type="hidden" name="_csrf" value="${csrf}"><input type="hidden" name="type" value="${type}">
-<label for="v-${type}">${n.en}</label><input type="text" id="v-${type}" name="value" required maxlength="40" placeholder="${n.example}" value="${escapeHtml(values.type === type ? values.value : '')}" autocomplete="off">
-<div class="muted">Expected: ${identifierFormats[type].hint}</div>
+<label for="v-${type}">${n.en}</label><input type="text" id="v-${type}" name="value" required${type === 'cadastral' ? '' : ' maxlength="40"'} placeholder="${n.example}" value="${escapeHtml(values.type === type ? values.value : '')}" autocomplete="off">
+${identifierFormats[type] ? `<div class="muted">Expected: ${identifierFormats[type].hint}</div>` : ''}
 <label for="l-${type}">Label (optional)</label><input type="text" id="l-${type}" name="label" maxlength="100" value="${escapeHtml(values.type === type ? values.label : '')}">
 <p><button class="primary">Add and run baseline check</button></p></form></div>`).join('');
   return `${error ? `<div class="flash error">${escapeHtml(error)}</div>` : ''}<h2>New tracking</h2>
