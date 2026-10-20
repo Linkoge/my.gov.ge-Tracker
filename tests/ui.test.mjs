@@ -11,7 +11,7 @@ import { validateIdentifierInput } from '../config.mjs';
 import { loadRuntime } from '../runtime.mjs';
 import { StateStore, targetKey } from '../state-store.mjs';
 import { runLoop, runOnce } from '../tracking.mjs';
-import { createApp } from '../ui-server.mjs';
+import { DEFAULT_UI_PORT, HEALTH_MARKER, createApp, parsePublicOrigin } from '../ui-server.mjs';
 
 const entry = { key: 'k1', date: '2025-09-20T12:00:00.000Z', description: 'd', status: 's', registrationNumber: '1' };
 const samples = {
@@ -21,13 +21,13 @@ const samples = {
 };
 const quiet = { log() {}, error() {} };
 
-async function start(t, { env = {}, search, fetchImpl, tracked } = {}) {
+async function start(t, { env = {}, search, fetchImpl, tracked, publicOrigin } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'mygov-ui-test-'));
   const configPath = join(dir, 'tracked.json');
   if (tracked) await writeFile(configPath, JSON.stringify(tracked));
   const searched = [];
   const app = createApp({
-    configPath, dataDir: join(dir, 'data'), port: 0, logger: quiet, fetchImpl,
+    configPath, dataDir: join(dir, 'data'), port: 0, logger: quiet, fetchImpl, publicOrigin,
     env: { TRACKER_ENV_FILE: '/dev/null', ...env },
     search: search ?? (async target => { searched.push(target); return [entry]; }),
   });
@@ -286,4 +286,95 @@ test('CLI prints usage, serves the UI on loopback and rejects non-loopback hosts
   });
   const page = await (await fetch(url)).text();
   assert.match(page, /Current trackings/);
+});
+
+// Raw request so Host/Origin/X-Forwarded-* can be set exactly as a reverse proxy would send them.
+function raw(app, { method = 'GET', path = '/', headers = {}, body = '' }) {
+  return new Promise((resolve, reject) => {
+    const { port } = app.server.address();
+    const req = request({ host: '127.0.0.1', port, method, path, headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers } }, res => {
+      let text = ''; res.setEncoding('utf8'); res.on('data', c => { text += c; }); res.on('end', () => resolve({ status: res.statusCode, text, headers: res.headers }));
+    });
+    req.on('error', reject); req.end(body);
+  });
+}
+const PROXY = 'https://tracker-host.example.ts.net:8791';
+const PROXY_HOST = 'tracker-host.example.ts.net:8791';
+
+test('dedicated default port is 8790, never the Bot Boss port 8787', () => {
+  assert.equal(DEFAULT_UI_PORT, 8790);
+});
+
+test('public origin parsing accepts only an exact scheme, hostname and port', () => {
+  assert.equal(parsePublicOrigin(undefined), null);
+  assert.equal(parsePublicOrigin(''), null);
+  assert.deepEqual(parsePublicOrigin(PROXY), { origin: PROXY, hosts: [PROXY_HOST] });
+  assert.deepEqual(parsePublicOrigin('https://Tracker.Example.ts.net'), { origin: 'https://tracker.example.ts.net', hosts: ['tracker.example.ts.net:443', 'tracker.example.ts.net'] });
+  for (const bad of ['tracker.example', 'ftp://h.example', 'https://u:p@h.example', 'https://h.example/path', 'https://h.example/', 'https://h.example?x', 'https://*.example']) {
+    assert.throws(() => parsePublicOrigin(bad), /public origin/, bad);
+  }
+  assert.throws(() => createApp({ publicOrigin: 'https://h.example/x', search: async () => [] }), /public origin/);
+});
+
+test('configured private HTTPS origin works through a proxy while CSRF and foreign hosts stay enforced', async t => {
+  const h = await start(t, { publicOrigin: PROXY });
+  const page = await raw(h.app, { headers: { host: PROXY_HOST } });
+  assert.equal(page.status, 200);
+  assert.match(page.text, /my\.gov\.ge tracker/);
+  const token = (await raw(h.app, { path: '/new', headers: { host: PROXY_HOST } })).text.match(/name="_csrf" value="([0-9a-f]+)"/)[1];
+  const form = fields => new URLSearchParams(fields).toString();
+  // Exact external Host + HTTPS Origin with the token: accepted.
+  const ok = await raw(h.app, { method: 'POST', path: '/track/add', headers: { host: PROXY_HOST, origin: PROXY }, body: form({ _csrf: token, ...samples.id }) });
+  assert.equal(ok.status, 303);
+  await h.app.idle();
+  assert.deepEqual((await h.listed()).map(({ type, value }) => ({ type, value })), [samples.id]);
+  // Missing or wrong token through the proxy: rejected.
+  assert.equal((await raw(h.app, { method: 'POST', path: '/track/add', headers: { host: PROXY_HOST, origin: PROXY }, body: form(samples.cadastral) })).status, 403);
+  assert.equal((await raw(h.app, { method: 'POST', path: '/track/add', headers: { host: PROXY_HOST, origin: PROXY }, body: form({ _csrf: 'f'.repeat(48), ...samples.cadastral }) })).status, 403);
+  // Mismatched origins for the proxy host: wrong scheme, port, hostname, foreign site.
+  for (const origin of ['http://tracker-host.example.ts.net:8791', 'https://tracker-host.example.ts.net', 'https://tracker-host.example.ts.net:8792', 'https://other.example.ts.net:8791', 'https://evil.example']) {
+    const r = await raw(h.app, { method: 'POST', path: '/track/add', headers: { host: PROXY_HOST, origin }, body: form({ _csrf: token, ...samples.cadastral }) });
+    assert.equal(r.status, 403, origin);
+  }
+  // The proxy origin is not valid for a loopback Host, and vice versa.
+  assert.equal((await raw(h.app, { method: 'POST', path: '/track/add', headers: { host: '127.0.0.1', origin: PROXY }, body: form({ _csrf: token, ...samples.cadastral }) })).status, 403);
+  // Foreign or near-miss hosts are rejected; forwarded headers grant nothing.
+  for (const host of ['evil.example', 'tracker-host.example.ts.net', 'tracker-host.example.ts.net:8792', 'other.example.ts.net:8791']) {
+    assert.equal((await raw(h.app, { headers: { host } })).status, 403, host);
+  }
+  assert.equal((await raw(h.app, { headers: { host: 'evil.example', 'x-forwarded-host': PROXY_HOST, 'x-forwarded-proto': 'https' } })).status, 403);
+  assert.equal((await raw(h.app, { method: 'POST', path: '/track/add', headers: { host: PROXY_HOST, origin: 'https://evil.example', 'x-forwarded-host': 'evil.example' }, body: form({ _csrf: token, ...samples.cadastral }) })).status, 403);
+  assert.equal((await h.listed()).length, 1);
+  // Local access is unchanged.
+  assert.equal((await h.post('/track/add', samples.registration)).status, 303);
+  await h.app.idle();
+  assert.equal(h.app.server.address().address, '127.0.0.1');
+});
+
+test('without a public origin only loopback hosts are accepted', async t => {
+  const h = await start(t);
+  assert.equal(h.app.publicOrigin, null);
+  assert.equal((await raw(h.app, { headers: { host: PROXY_HOST } })).status, 403);
+  assert.equal((await raw(h.app, { headers: { host: `localhost:${h.app.server.address().port}` } })).status, 200);
+});
+
+test('health endpoint identifies the tracker on loopback and through the proxy only', async t => {
+  const h = await start(t, { publicOrigin: PROXY });
+  const local = await raw(h.app, { path: '/healthz' });
+  assert.equal(local.status, 200);
+  assert.equal(local.text, `${HEALTH_MARKER}\n`);
+  assert.equal((await raw(h.app, { path: '/healthz', headers: { host: PROXY_HOST } })).status, 200);
+  assert.equal((await raw(h.app, { path: '/healthz', headers: { host: 'evil.example' } })).status, 403);
+});
+
+test('a fresh install without config opens an empty tracking page and adds nothing', async t => {
+  const messages = [];
+  const h = await start(t, { fetchImpl: async () => { messages.push(1); return { ok: true, json: async () => ({ ok: true }) }; } });
+  const page = await h.get('/');
+  assert.match(page, /my\.gov\.ge tracker/);
+  assert.equal(page.includes(samples.cadastral.value), false);
+  await h.app.idle();
+  assert.deepEqual(await h.listed(), []);
+  assert.deepEqual(h.searched, []);
+  assert.deepEqual(messages, []);
 });

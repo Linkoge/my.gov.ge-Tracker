@@ -25,7 +25,7 @@ while [ $# -gt 0 ]; do
   if [ "$1" = "--output" ]; then out="$2"; shift; fi
   shift
 done
-[ -n "$out" ] && printf '%s' "${FAKE_CURL_BODY-<title>Trackings – my.gov.ge tracker</title>}" > "$out"
+[ -n "$out" ] && printf '%s\n' "${FAKE_CURL_BODY-mygov-tracker ok}" > "$out"
 printf '%s' "${FAKE_CURL_STATUS:-200}"
 exit "${FAKE_CURL_EXIT:-0}"
 """
@@ -117,7 +117,7 @@ def test_unit_file_runs_from_current_release_with_private_state():
     assert "releases/current/app" in unit
     assert "--config %h/.local/share/mygov-tracker/private/tracked.json" in unit
     assert "--data-dir %h/.local/share/mygov-tracker/private/data" in unit
-    assert "--host 127.0.0.1" in unit and "--port 8787" in unit
+    assert "--host 127.0.0.1" in unit and "--port 8790" in unit and "8787" not in unit
     assert "EnvironmentFile=-" in unit
 
 
@@ -277,7 +277,8 @@ def test_health_passes_when_service_active_and_ui_answers(env):
     result = run("health", env)
     assert result.returncode == 0, result.stderr
     assert "healthy" in result.stdout
-    assert any("http://127.0.0.1:8787/" in line for line in calls(env))
+    assert any("http://127.0.0.1:8790/healthz" in line for line in calls(env))
+    assert not any("8787" in line for line in calls(env))
 
 
 @pytest.mark.parametrize(
@@ -287,6 +288,7 @@ def test_health_passes_when_service_active_and_ui_answers(env):
         {"FAKE_CURL_STATUS": "500"},
         {"FAKE_CURL_STATUS": "000", "FAKE_CURL_EXIT": "7"},
         {"FAKE_CURL_BODY": "<html>some other app</html>"},
+        {"FAKE_CURL_BODY": "<title>Bot Boss</title> mygov-tracker ok"},
     ],
 )
 def test_health_fails_on_any_bad_signal(env, extra):
@@ -295,7 +297,33 @@ def test_health_fails_on_any_bad_signal(env, extra):
 
 
 def test_health_rejects_urls_with_credentials_and_bad_timeouts(env):
-    assert run("health", env, DEPLOY_HEALTH_URL="http://user:pw@127.0.0.1:8787/").returncode != 0
+    assert run("health", env, DEPLOY_HEALTH_URL="http://user:pw@127.0.0.1:8790/").returncode != 0
     assert run("health", env, DEPLOY_HEALTH_URL="file:///etc/passwd").returncode != 0
     assert run("health", env, DEPLOY_HEALTH_WINDOW_SECONDS="abc").returncode != 0
     assert not calls(env)
+
+
+def test_first_deploy_bootstraps_empty_tracking_list(env, tmp_path):
+    repo = make_repo(tmp_path)
+    assert deploy(env, repo).returncode == 0
+    tracked = Path(env["MYGOV_DEPLOY_ROOT"]) / "private" / "tracked.json"
+    assert json.loads(tracked.read_text()) == {"identifiers": []}
+    assert oct(tracked.stat().st_mode & 0o777) == "0o600"
+
+
+def test_deploy_never_overwrites_existing_private_config_or_data(env, tmp_path):
+    private = Path(env["MYGOV_DEPLOY_ROOT"]) / "private"
+    (private / "data").mkdir(parents=True)
+    existing = '{"identifiers": [{"type": "id", "value": "00000000000"}]}'
+    (private / "tracked.json").write_text(existing)
+    (private / "data" / "ui-settings.json").write_text("{}")
+    repo = make_repo(tmp_path)
+    assert deploy(env, repo).returncode == 0
+    make_repo(tmp_path, marker="two")
+    assert deploy(env, repo).returncode == 0
+    assert (private / "tracked.json").read_text() == existing
+    assert (private / "data" / "ui-settings.json").read_text() == "{}"
+
+
+def test_runtime_env_example_documents_public_origin():
+    assert "TRACKER_PUBLIC_ORIGIN=" in (DEPLOY / "runtime.env.example").read_text().splitlines()

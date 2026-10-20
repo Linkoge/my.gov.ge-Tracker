@@ -15,6 +15,13 @@ sha="$(git -C "$DEPLOY_REPO" rev-parse --verify --quiet "$DEPLOY_COMMIT^{commit}
 
 mkdir -p "$RELEASES_DIR" "$UNIT_DIR" "$PRIVATE_DIR/data"
 chmod 700 "$PRIVATE_DIR" "$PRIVATE_DIR/data"
+# Fresh install: an empty identifier list so the UI opens empty. Existing configuration is never touched.
+if [ ! -e "$PRIVATE_DIR/tracked.json" ]; then
+  tmp_cfg="$PRIVATE_DIR/.tracked.json.$$"
+  printf '{\n  "identifiers": []\n}\n' > "$tmp_cfg"
+  ln "$tmp_cfg" "$PRIVATE_DIR/tracked.json" 2>/dev/null || true
+  rm -f "$tmp_cfg"
+fi
 exec 9>"$RELEASES_DIR/.deploy.lock"
 flock -n 9 || die "another deploy is running"
 

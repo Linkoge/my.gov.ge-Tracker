@@ -13,13 +13,35 @@ import { deletePage, layout, newPage, settingsPage, trackingsPage } from './ui-p
 class UserError extends Error { constructor(message, status = 400) { super(message); this.status = status; } }
 
 export const LOOPBACK_HOSTS = ['127.0.0.1', '::1', 'localhost'];
+export const DEFAULT_UI_PORT = 8790;
+// Plain-text identity served at /healthz so deploy/health can tell this app from anything else on the port.
+export const HEALTH_MARKER = 'mygov-tracker ok';
+
+// Parse the single external origin a private reverse proxy (e.g. Tailscale serve) presents, such as
+// "https://host.tailnet.ts.net:8791". Returns { origin, hosts } where hosts are the exact Host header values accepted.
+export function parsePublicOrigin(value) {
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  const text = String(value).trim();
+  let url;
+  try { url = new URL(text); } catch { throw new Error('Invalid public origin; use scheme://hostname[:port]'); }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash
+    || url.pathname !== '/' || /[/?#]$/.test(text) || !url.hostname || url.hostname.includes('*')) {
+    throw new Error('Invalid public origin; use scheme://hostname[:port] with no path, credentials or wildcard');
+  }
+  const defaultPort = url.protocol === 'https:' ? '443' : '80';
+  const port = url.port || defaultPort;
+  const hosts = [`${url.hostname}:${port}`];
+  if (port === defaultPort) hosts.push(url.hostname);
+  return { origin: url.origin, hosts };
+}
 
 // Local web UI + optional scheduler. `search(target, config)` performs one registry search.
 export function createApp({
   search, configPath = defaultConfigPath, dataDir, env = process.env, envPath, fetchImpl = fetch,
-  logger = console, host = '127.0.0.1', port = 8787,
+  logger = console, host = '127.0.0.1', port = DEFAULT_UI_PORT, publicOrigin,
 } = {}) {
   if (!LOOPBACK_HOSTS.includes(host)) throw new Error('The UI has no login and can only bind to a loopback address (127.0.0.1, ::1 or localhost)');
+  const external = parsePublicOrigin(publicOrigin);
   configPath = resolve(configPath);
   const csrf = randomBytes(24).toString('hex');
   const targets = new TargetsStore(configPath);
@@ -191,14 +213,22 @@ export function createApp({
       res.end(body);
     };
     try {
-      // Reject DNS-rebinding and cross-site requests; the UI has no login of its own.
-      const hostHeader = req.headers.host ?? '';
+      // Reject DNS-rebinding and cross-site requests; the UI has no login of its own. Only loopback hosts and the one
+      // configured external origin are accepted; forwarded headers (X-Forwarded-*) are deliberately ignored.
+      const hostHeader = (req.headers.host ?? '').toLowerCase();
       const allowed = LOOPBACK_HOSTS.map(h => (h.includes(':') ? `[${h}]` : h));
-      if (!allowed.includes(hostHeader.replace(/:\d+$/, ''))) throw new UserError('Forbidden host', 403);
+      const viaProxy = Boolean(external?.hosts.includes(hostHeader));
+      if (!viaProxy && !allowed.includes(hostHeader.replace(/:\d+$/, ''))) throw new UserError('Forbidden host', 403);
+      const expectedOrigin = viaProxy ? external.origin : `http://${hostHeader}`;
       const url = new URL(req.url, `http://${hostHeader}`);
+      if (req.method === 'GET' && url.pathname === '/healthz') {
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+        res.end(`${HEALTH_MARKER}\n`);
+        return;
+      }
       let form = new URLSearchParams();
       if (req.method === 'POST') {
-        if (req.headers.origin && req.headers.origin !== `http://${hostHeader}`) throw new UserError('Forbidden origin', 403);
+        if (req.headers.origin && req.headers.origin !== expectedOrigin) throw new UserError('Forbidden origin', 403);
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 16384) throw new UserError('Request too large', 413); }
         form = new URLSearchParams(body);
@@ -216,7 +246,7 @@ export function createApp({
   });
 
   return {
-    server, targets, waker,
+    server, targets, waker, publicOrigin: external?.origin ?? null,
     get url() { return `http://${host.includes(':') ? `[${host}]` : host}:${address?.port ?? port}`; },
     listen: () => new Promise((resolveListen, reject) => {
       server.once('error', reject);

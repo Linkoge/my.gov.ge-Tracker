@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Check that the user service is active and the web UI answers on loopback with its own page.
-# Environment: DEPLOY_HEALTH_URL (default http://127.0.0.1:8787/), DEPLOY_HEALTH_WINDOW_SECONDS (60),
+# Check that the user service is active and the tracker itself answers on its dedicated loopback port: /healthz must
+# return the tracker's identity line, so another application's HTTP 200 on the port never counts as healthy.
+# Environment: DEPLOY_HEALTH_URL (default http://127.0.0.1:8790/healthz), DEPLOY_HEALTH_WINDOW_SECONDS (60),
 # DEPLOY_HEALTH_INTERVAL_SECONDS (2), DEPLOY_HEALTH_REQUEST_SECONDS (10).
 set -euo pipefail
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/common.sh"
 
-url="${DEPLOY_HEALTH_URL:-http://127.0.0.1:8787/}"
+url="${DEPLOY_HEALTH_URL:-http://127.0.0.1:8790/healthz}"
 window="${DEPLOY_HEALTH_WINDOW_SECONDS:-60}"
 interval="${DEPLOY_HEALTH_INTERVAL_SECONDS:-2}"
 request="${DEPLOY_HEALTH_REQUEST_SECONDS:-10}"
@@ -21,8 +22,8 @@ deadline=$((SECONDS + window))
 status=000
 while :; do
   status="$(curl --silent --noproxy '*' --proto '=http,https' --output "$body" --max-time "$request" --write-out '%{http_code}' -- "$url" 2>/dev/null)" || status=000
-  if [ "$status" = 200 ] && systemctl_user is-active --quiet "$SERVICE_NAME" && grep -q 'my.gov.ge tracker' "$body"; then
-    echo "healthy: user service active, web UI answered HTTP 200"
+  if [ "$status" = 200 ] && systemctl_user is-active --quiet "$SERVICE_NAME" && grep -qx 'mygov-tracker ok' "$body"; then
+    echo "healthy: user service active, tracker identified on its port"
     exit 0
   fi
   [ "$SECONDS" -lt "$deadline" ] || break

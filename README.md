@@ -57,7 +57,7 @@ node tracker.mjs loop --config tracked.json --data-dir /private/path/mygov-data 
 A small local web interface manages trackings and settings and runs the scheduler. It uses only Node built-ins (no extra dependencies):
 
 ```sh
-node ui.mjs                      # http://127.0.0.1:8787, scheduler included
+node ui.mjs                      # http://127.0.0.1:8790, scheduler included
 node ui.mjs --port 9000          # another port (or set TRACKER_UI_PORT)
 node ui.mjs --no-scheduler       # manage only; checks run via "Check now"
 ```
@@ -88,7 +88,8 @@ Environment variables override local `.env` values (and values saved in the [web
 | `TRACKER_TIMEOUT_MS` | Timeout per browser/API operation, defaults to 15000; maximum 60000 |
 | `CHROME_PATH` | Browser executable, defaults to `/usr/bin/google-chrome` |
 | `TRACKER_ENV_FILE` | Alternate local environment-file path |
-| `TRACKER_UI_PORT`, `TRACKER_UI_HOST` | Web UI port (default 8787) and loopback host (default `127.0.0.1`) |
+| `TRACKER_UI_PORT`, `TRACKER_UI_HOST` | Web UI port (default 8790; 8787 belongs to Bot Boss) and loopback host (default `127.0.0.1`) |
+| `TRACKER_PUBLIC_ORIGIN` | Optional single external origin of a private reverse proxy, exactly `scheme://hostname[:port]` (e.g. `https://codex-server.tail5ebb9d.ts.net:8791`); also `--public-origin` |
 
 JSON also accepts `dataDir`, `intervalMinutes` and `timeoutMs`; each identifier may also have a `label` string and `"paused": true` (skipped by `once` and `loop`; the UI manages both). Precedence: UI-saved settings (Telegram and interval only), command-line override, environment/local `.env`, JSON, default. Explicit relative config/data paths resolve from the current working directory; default config/data paths resolve beside the application. An absent config is an error; use `--config tracked.example.json` to try the supplied cadastral example.
 
@@ -145,14 +146,25 @@ The repository also retains its credential-path guard: `node scripts/check-secre
 
 ## Deployment
 
-`.linko-deploy.json` points the application at the scripts in `deploy/`; the application merges and runs them. The tracker runs as the user systemd unit `mygov-tracker.service` (`node ui.mjs`, UI and scheduler on `127.0.0.1:8787`).
+`.linko-deploy.json` points the application at the scripts in `deploy/`; the application merges and runs them. The tracker runs as the user systemd unit `mygov-tracker.service` (`node ui.mjs`, UI and scheduler on the dedicated port `127.0.0.1:8790`; Bot Boss keeps 8787).
 
 - `deploy/deploy` exports `DEPLOY_COMMIT` (default `HEAD`) of `DEPLOY_REPO` into `~/.local/share/mygov-tracker/releases/<id>/app`, installs dependencies (previous release if `package-lock.json` is unchanged, else `npm ci --omit=dev`, else a matching `node_modules` from the checkout), installs the unit from the release, switches `releases/current` atomically and restarts the service. It keeps the newest 5 releases.
 - `deploy/backup` copies the private state (`private/tracked.json`, `private/data/`) and records the active release in `backups/pre-deploy`.
-- `deploy/health` requires the service to be active and `http://127.0.0.1:8787/` to answer 200 with the tracker page (`DEPLOY_HEALTH_URL`, `DEPLOY_HEALTH_WINDOW_SECONDS` to tune).
+- `deploy/deploy` also creates `private/tracked.json` as an empty list on a fresh install (the UI opens empty; no example identifiers, no notifications). An existing `tracked.json` or `data/` is never overwritten.
+- `deploy/health` requires the service to be active and `http://127.0.0.1:8790/healthz` to answer 200 with exactly `mygov-tracker ok`, so another application's 200 on the port fails (`DEPLOY_HEALTH_URL`, `DEPLOY_HEALTH_WINDOW_SECONDS` to tune).
 - `deploy/rollback` repoints `current` at the recorded release and restarts; `DEPLOY_RESTORE_DATA=1` also restores the backed-up private state.
 
-Identifiers and state live in `~/.local/share/mygov-tracker/private/`, outside every release, so the checkout's `tracked.json`/`data/` are not used by the service. Optional Telegram/login settings go in `~/.config/mygov-tracker/runtime.env` (see `deploy/runtime.env.example`; create it privately, never commit it). Tests: `tests/test_deploy.py` (fake `systemctl`/`curl`/`npm`, disposable directories).
+Identifiers and state live in `~/.local/share/mygov-tracker/private/`, outside every release, so the checkout's `tracked.json`/`data/` are not used by the service. Optional Telegram/login settings go in `~/.config/mygov-tracker/runtime.env` (see `deploy/runtime.env.example`; create it privately, never commit it). ### Private HTTPS access (Tailscale)
+
+The service always binds loopback. A private proxy may expose it, and the UI accepts that proxy's Host and HTTPS Origin only after you configure them in `TRACKER_PUBLIC_ORIGIN`. Requests must match the configured scheme, hostname and port exactly. Other hosts and origins are still rejected, as are mismatched scheme/port pairs. Forms still need the CSRF token. `X-Forwarded-*` headers are ignored. Loopback access and `/healthz` work unchanged. Host activation (one time, by the manager/host agent):
+
+1. Add `TRACKER_PUBLIC_ORIGIN=https://codex-server.tail5ebb9d.ts.net:8791` to `~/.config/mygov-tracker/runtime.env` (mode 0600).
+2. Remove any temporary unit drop-in that overrides `--port`; the shipped unit already uses 8790. Then run `systemctl --user daemon-reload && systemctl --user restart mygov-tracker.service`, or let the next deploy restart it.
+3. Check `curl -s http://127.0.0.1:8790/healthz` prints `mygov-tracker ok`.
+4. Route only the tracker's own port: `tailscale serve --bg --https=8791 http://127.0.0.1:8790`. Leave Bot Boss's routes and port 8787 untouched.
+5. Open `https://codex-server.tail5ebb9d.ts.net:8791/` from a tailnet device.
+
+Tests: `tests/test_deploy.py` (fake `systemctl`/`curl`/`npm`, disposable directories).
 
 ## Live verification — 2026-10-17 (Asia/Tbilisi)
 
