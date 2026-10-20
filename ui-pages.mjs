@@ -40,7 +40,7 @@ h2{font-size:22px;line-height:1.25;margin:4px 0 12px}h3{font-size:17px;margin:0 
 .muted{color:var(--muted);font-size:14px}
 .ok{color:var(--ok)}.err{color:var(--err)}
 .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:13px;font-weight:600;background:var(--ok-bg);color:var(--ok);white-space:nowrap}
-.pill.paused{background:var(--warn-bg);color:var(--warn)}.pill.busy{background:#dbe8ff;color:var(--accent-dark)}
+.pill.test{background:#efe3ff;color:#5b21a6}.pill.paused{background:var(--warn-bg);color:var(--warn)}.pill.busy{background:#dbe8ff;color:var(--accent-dark)}
 .flash{padding:12px 14px;border-radius:10px;margin-bottom:16px;font-weight:500;border:1px solid transparent}
 .flash.ok{background:var(--ok-bg);color:var(--ok);border-color:#b6e2c3}.flash.error{background:var(--err-bg);color:var(--err);border-color:#f2bcbc}
 .cards{display:grid;grid-template-columns:1fr;gap:16px}.cards .card{margin:0;display:flex;flex-direction:column;gap:12px}
@@ -49,7 +49,7 @@ h2{font-size:22px;line-height:1.25;margin:4px 0 12px}h3{font-size:17px;margin:0 
 .t-type{margin-top:2px}
 dl.facts{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:0}
 dl.facts dt{color:var(--muted);font-size:14px}dl.facts dd{margin:0;text-align:right}
-.actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:auto}
+.actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:auto}
 .actions form{display:flex;margin:0}
 button,.btn{font:inherit;font-weight:600;overflow-wrap:normal;word-break:normal;min-height:48px;padding:10px 6px;border:1px solid #9aa6bb;border-radius:10px;background:#fff;color:var(--ink);cursor:pointer;width:100%;text-align:center;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
 button:hover,.btn:hover{background:#eef2f8}
@@ -100,19 +100,21 @@ export function trackingsPage({ rows, csrf, problem }) {
   const cards = rows.map(r => {
     const names = typeNames[r.type];
     const fields = { type: r.type, value: r.value };
-    const state = r.running ? '<span class="pill busy">checking…</span>' : r.paused ? '<span class="pill paused">paused</span>' : '<span class="pill">active</span>';
+    const state = (r.running ? '<span class="pill busy">checking…</span>' : r.paused ? '<span class="pill paused">paused</span>' : '<span class="pill">active</span>') +
+      (r.testPending ? ' <span class="pill test">Test pending</span>' : '');
     const result = !r.check ? '<span class="muted">not checked yet</span>'
       : r.check.ok ? '<span class="ok">OK</span>' : `<span class="err">${escapeHtml(r.check.error)}</span>`;
     return `<article class="card tracking">
 <div class="t-head"><div><p class="t-id">${escapeHtml(r.label || r.value)}</p><div class="muted t-type">${names.en} (${names.ka})${r.label ? `<br>${escapeHtml(r.value)}` : ''}</div></div>${state}</div>
 <dl class="facts"><dt>Last check</dt><dd>${when(r.check?.checkedAt)}</dd><dt>Last result</dt><dd>${result}</dd><dt>Latest entry</dt><dd>${when(r.latestDate)}</dd><dt>Results</dt><dd>${r.count ?? '—'}</dd></dl>
 <div class="actions">${post(csrf, '/track/check', fields, 'Check now')}${post(csrf, r.paused ? '/track/resume' : '/track/pause', fields, r.paused ? 'Resume' : 'Pause')}
+<form method="get" action="/track/test-alert"><input type="hidden" name="type" value="${r.type}"><input type="hidden" name="value" value="${escapeHtml(r.value)}"><button>Test alert</button></form>
 <form method="get" action="/track/delete"><input type="hidden" name="type" value="${r.type}"><input type="hidden" name="value" value="${escapeHtml(r.value)}"><button class="danger">Delete</button></form></div>
 </article>`;
   }).join('');
   const body = rows.length ? `<div class="cards">${cards}</div>` : '<div class="card empty">Nothing is tracked yet.<p><a class="btn primary" href="/new">Add a tracking</a></p></div>';
   return `${problem ? `<div class="flash error">${escapeHtml(problem)}</div>` : ''}<h2>Current trackings</h2>${body}
-<p class="muted">Paused items are skipped by the scheduler. “Check now” also works on paused items. Delete asks for confirmation.</p>`;
+<p class="muted">Paused items are skipped by the scheduler. “Check now” also works on paused items. “Test alert” and Delete ask for confirmation.</p>`;
 }
 
 export function newPage({ csrf, values = {}, error }) {
@@ -136,6 +138,13 @@ export function deletePage({ csrf, target }) {
   return `<h2>Delete tracking?</h2><div class="card narrow"><p><strong>${escapeHtml(target.label || target.value)}</strong> — ${n.en} ${escapeHtml(target.value)}</p>
 <p>Its saved baseline and history are removed. Adding it again later starts a new silent baseline.</p>
 <div class="stack">${post(csrf, '/track/delete', { type: target.type, value: target.value }, 'Delete permanently', 'danger')}<a class="btn" href="/">Cancel</a></div></div>`;
+}
+
+export function testAlertPage({ csrf, target }) {
+  const n = typeNames[target.type];
+  return `<h2>Send a test alert?</h2><div class="card narrow"><p><strong>${escapeHtml(target.label || target.value)}</strong> — ${n.en} ${escapeHtml(target.value)}</p>
+<p>This fakes an older saved baseline: the newest saved entry is forgotten, so the next check (scheduled or “Check now”) sees it as new and sends a real Telegram notification. Only the newest entry is re-alerted; afterwards the baseline is real again.</p>
+<div class="stack">${post(csrf, '/track/test-alert', { type: target.type, value: target.value }, 'Simulate old baseline', 'primary')}<a class="btn" href="/">Cancel</a></div></div>`;
 }
 
 export function settingsPage({ csrf, view }) {

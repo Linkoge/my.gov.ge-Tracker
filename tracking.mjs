@@ -71,6 +71,7 @@ async function checkTargets({ config, search, notify, targets, logger = console,
           await store.write(state);
           notified++;
         }
+        if (tracked.testPending) { delete tracked.testPending; await store.write(state); }
         await store.recordStatus(key, { checkedAt: tracked.lastCheckedAt, ok: true, count: entries.length, error: null }).catch(() => {});
         const result = { ...target, baselined, count: entries.length, latestDate: tracked.latestDate, notified };
         report.identifiers.push(result);

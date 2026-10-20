@@ -8,7 +8,7 @@ import { StateStore, targetKey } from './state-store.mjs';
 import { TargetsStore } from './targets-store.mjs';
 import { Waker, runLoop, runOnce, withDataLock } from './tracking.mjs';
 import { SettingsStore, applyUiSettings, validateUiSettings } from './ui-settings.mjs';
-import { deletePage, layout, newPage, settingsPage, trackingsPage } from './ui-pages.mjs';
+import { deletePage, layout, testAlertPage, newPage, settingsPage, trackingsPage } from './ui-pages.mjs';
 
 class UserError extends Error { constructor(message, status = 400) { super(message); this.status = status; } }
 
@@ -88,7 +88,7 @@ export function createApp({
       const known = state.targets[key];
       const check = status[key] ?? (known?.lastCheckedAt ? { ok: true, checkedAt: known.lastCheckedAt, error: null } : null);
       const count = status[key]?.count ?? (known ? Object.keys(known.seen).length + Object.keys(known.pending).length : null);
-      return { ...target, running: running.has(key), check, count, latestDate: known?.latestDate ?? null };
+      return { ...target, running: running.has(key), check, count, latestDate: known?.latestDate ?? null, testPending: Boolean(known?.testPending) };
     });
     return { config, rows, problem };
   }
@@ -139,6 +139,23 @@ export function createApp({
     waker.wake();
   }
 
+  // Test mode: rewinds the stored baseline so the next check re-alerts the newest entry through the normal path.
+  async function rewindForTest(target) {
+    const key = targetKey(target);
+    if (running.has(key)) throw new UserError('A check is running for this tracking; try again when it finishes', 409);
+    const config = await runtime();
+    let result;
+    try { result = await withDataLock(config.dataDir, store => store.rewindBaseline(key)); }
+    catch (error) { throw new UserError(safeError(error, config.settings), 409); }
+    const problems = {
+      'no-baseline': 'No baseline saved yet; run a check first',
+      'already-pending': 'A test alert is already pending; run Check now',
+      'nothing-saved': 'No saved entries to re-alert for this tracking',
+    };
+    if (problems[result.status]) throw new UserError(problems[result.status], 409);
+    return result;
+  }
+
   async function sendTest() {
     const config = await runtime();
     const { TELEGRAM_BOT_TOKEN: token, TELEGRAM_CHAT_ID: chat } = config.settings;
@@ -170,6 +187,19 @@ export function createApp({
       case 'POST /track/check': {
         const target = await requireTarget(form);
         return go('ok', startCheck(target) ? 'Check started' : 'A check is already running');
+      }
+      case 'GET /track/test-alert': {
+        const target = await requireTarget(url.searchParams);
+        return page('Test alert', testAlertPage({ csrf, target }), { active: 'list' });
+      }
+      case 'POST /track/test-alert': {
+        const target = await requireTarget(form);
+        try { await rewindForTest(target); }
+        catch (error) {
+          if (!(error instanceof UserError)) throw error;
+          flash = { kind: 'error', text: error.message }; return { redirect: '/' };
+        }
+        return go('ok', 'Test alert armed: the next check re-sends the newest entry');
       }
       case 'GET /track/delete': {
         const target = await requireTarget(url.searchParams);

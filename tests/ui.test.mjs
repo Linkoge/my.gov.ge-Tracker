@@ -496,3 +496,66 @@ test('no horizontal overflow and visible tappable actions at 320px and 390px', a
     await page.close();
   }
 });
+
+test('Test alert asks for confirmation, rewinds the baseline, shows Test pending and re-alerts once via Telegram', async t => {
+  const messages = [];
+  const older = { ...entry, key: 'k0', date: '2025-08-01T12:00:00.000Z', description: 'older entry' };
+  const h = await start(t, {
+    tracked: { identifiers: Object.values(samples) }, search: async () => [older, entry],
+    fetchImpl: async (url, init) => { messages.push(JSON.parse(init.body).text); return { ok: true, json: async () => ({ ok: true }) }; },
+    env: { TELEGRAM_BOT_TOKEN: 'env-tok-1', TELEGRAM_CHAT_ID: '42' },
+  });
+  for (const sample of Object.values(samples)) { await h.post('/track/check', sample); await h.app.idle(); }
+  assert.deepEqual(messages, []);
+  assert.match(await h.get('/'), /action="\/track\/test-alert"[\s\S]*<button>Test alert<\/button>/);
+
+  for (const sample of Object.values(samples)) {
+    const confirm = await h.get(`/track/test-alert?type=${sample.type}&value=${encodeURIComponent(sample.value)}`);
+    assert.match(confirm, /Simulate old baseline/);
+    assert.match(confirm, /action="\/track\/test-alert"/);
+    assert.equal((await h.post('/track/test-alert', sample)).status, 303);
+    const state = (await h.store.read()).targets[targetKey(sample)];
+    assert.equal(state.testPending, true);
+    assert.deepEqual(Object.keys(state.seen), ['k0']);
+    assert.equal(state.latestDate, older.date);
+  }
+  const page = await h.get('/');
+  assert.equal((page.match(/Test pending/g) ?? []).length, 3);
+  assert.deepEqual(messages, []);
+
+  await h.post('/track/check', samples.id);
+  await h.app.idle();
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /01234567890/);
+  assert.match(messages[0], /2025-09-20T12:00:00.000Z/);
+  assert.equal((await h.get('/')).match(/Test pending/g).length, 2);
+  await h.post('/track/check', samples.id);
+  await h.app.idle();
+  assert.equal(messages.length, 1);
+  for (const sample of [samples.cadastral, samples.registration]) { await h.post('/track/check', sample); await h.app.idle(); }
+  assert.equal(messages.length, 3);
+  assert.doesNotMatch(await h.get('/'), /Test pending/);
+});
+
+test('Test alert enforces CSRF and Origin and reports unusable trackings', async t => {
+  const h = await start(t, { tracked: { identifiers: [samples.cadastral, samples.id] } });
+  await h.post('/track/check', samples.cadastral);
+  await h.app.idle();
+  const token = await (async () => (await h.get('/')).match(/name="_csrf" value="([0-9a-f]+)"/)[1])();
+  assert.equal((await h.post('/track/test-alert', samples.cadastral, { token: 'bad' })).status, 403);
+  const foreign = await fetch(h.app.url + '/track/test-alert', {
+    method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded', origin: 'http://evil.example' },
+    body: new URLSearchParams({ _csrf: token, ...samples.cadastral }),
+  });
+  assert.equal(foreign.status, 403);
+  assert.equal((await h.store.read()).targets[targetKey(samples.cadastral)].testPending, undefined);
+
+  assert.equal((await h.post('/track/test-alert', { type: 'cadastral', value: 'nope' })).status, 404);
+  // Never checked: no baseline to rewind.
+  assert.equal((await h.post('/track/test-alert', samples.id)).status, 303);
+  assert.match(await h.get('/'), /No baseline saved yet/);
+  // Second press while pending does not rewind further.
+  await h.post('/track/test-alert', samples.cadastral);
+  await h.post('/track/test-alert', samples.cadastral);
+  assert.match(await h.get('/'), /already pending/);
+});

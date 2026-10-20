@@ -282,3 +282,79 @@ test('CLI exposes usage and returns nonzero for invalid mode/config without open
   await assert.rejects(exec(process.execPath, [cli, 'invalid-mode'], { timeout: 10000 }), error => error.code === 1 && /Specify once or loop/.test(error.stderr));
   await assert.rejects(exec(process.execPath, [cli, 'once', '--config', '/nonexistent/tracked.json'], { timeout: 10000 }), error => error.code === 1 && /configuration JSON/.test(error.stderr));
 });
+
+const dated = (key, date) => ({ key, date, description: `desc-${key}`, status: 'status', registrationNumber: '1' });
+const [old1, old2, newest] = [dated('a', '2025-01-01T00:00:00.000Z'), dated('b', '2025-02-01T00:00:00.000Z'), dated('c', '2025-03-01T00:00:00.000Z')];
+
+test('rewinding the baseline makes only the newest entry a real notification once', async t => {
+  const h = await harness(t);
+  h.setResults([old1, old2, newest]);
+  await h.run();
+  const key = targetKey(target);
+  const rewind = await h.store.rewindBaseline(key);
+  assert.deepEqual([rewind.status, rewind.removed], ['ok', 1]);
+  const rewound = (await h.store.read()).targets[key];
+  assert.equal(rewound.testPending, true);
+  assert.equal(rewound.latestDate, old2.date);
+  assert.deepEqual(Object.keys(rewound.seen).sort(), ['a', 'b']);
+  assert.equal((await h.store.rewindBaseline(key)).status, 'already-pending');
+  assert.deepEqual(Object.keys((await h.store.read()).targets[key].seen).sort(), ['a', 'b']);
+
+  assert.equal((await h.run()).identifiers[0].notified, 1);
+  assert.equal(h.messages.length, 1);
+  assert.ok(h.messages[0].includes('desc-c') && h.messages[0].includes(newest.date));
+  const after = (await h.store.read()).targets[key];
+  assert.equal(after.testPending, undefined);
+  assert.equal(after.latestDate, newest.date);
+  assert.equal(Object.keys(after.seen).length, 3);
+
+  assert.equal((await h.run()).identifiers[0].notified, 0);
+  assert.equal(h.messages.length, 1);
+});
+
+test('rewinding removes every entry sharing the newest date', async t => {
+  const h = await harness(t);
+  await h.run();
+  const key = targetKey(target);
+  assert.equal((await h.store.rewindBaseline(key)).removed, entries.length);
+  assert.equal((await h.run()).identifiers[0].notified, entries.length);
+});
+
+test('rewinding a one-entry baseline leaves an empty baseline dated 2012-01-01 and re-alerts that entry', async t => {
+  const h = await harness(t);
+  h.setResults([old1]);
+  await h.run();
+  const key = targetKey(target);
+  assert.equal((await h.store.rewindBaseline(key)).removed, 1);
+  const rewound = (await h.store.read()).targets[key];
+  assert.deepEqual(rewound.seen, {});
+  assert.equal(rewound.latestDate, '2012-01-01T00:00:00.000Z');
+  assert.equal((await h.run()).identifiers[0].notified, 1);
+  assert.equal(h.messages.length, 1);
+  assert.equal((await h.store.read()).targets[key].latestDate, old1.date);
+});
+
+test('rewinding with no baseline or no saved entries changes nothing', async t => {
+  const h = await harness(t);
+  const key = targetKey(target);
+  assert.equal((await h.store.rewindBaseline(key)).status, 'no-baseline');
+  h.setResults([]);
+  await h.run();
+  assert.equal((await h.store.rewindBaseline(key)).status, 'nothing-saved');
+  assert.equal((await h.store.read()).targets[key].testPending, undefined);
+});
+
+test('a failed check keeps the test pending marker and the notification is sent by the next good check', async t => {
+  const h = await harness(t);
+  h.setResults([old1, newest]);
+  await h.run();
+  const key = targetKey(target);
+  await h.store.rewindBaseline(key);
+  h.setResults(new Error('boom'));
+  await h.run();
+  assert.equal((await h.store.read()).targets[key].testPending, true);
+  h.setResults([old1, newest]);
+  await h.run();
+  assert.equal(h.messages.filter(m => m.includes('desc-c')).length, 1);
+  assert.equal((await h.store.read()).targets[key].testPending, undefined);
+});
