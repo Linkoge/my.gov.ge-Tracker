@@ -12,6 +12,7 @@ import { loadRuntime } from '../runtime.mjs';
 import { StateStore, targetKey } from '../state-store.mjs';
 import { runLoop, runOnce } from '../tracking.mjs';
 import { DEFAULT_UI_PORT, HEALTH_MARKER, createApp, parsePublicOrigin } from '../ui-server.mjs';
+import { formatWhen } from '../ui-pages.mjs';
 
 const entry = { key: 'k1', date: '2025-09-20T12:00:00.000Z', description: 'd', status: 's', registrationNumber: '1' };
 const samples = {
@@ -404,4 +405,94 @@ test('a fresh install without config opens an empty tracking page and adds nothi
   assert.deepEqual(await h.listed(), []);
   assert.deepEqual(h.searched, []);
   assert.deepEqual(messages, []);
+});
+
+test('pages are mobile-first: viewport meta, no external assets, active tab marked', async t => {
+  const h = await start(t, { tracked: { identifiers: [samples.cadastral] } });
+  for (const [path, label] of [['/', 'Trackings'], ['/new', 'New tracking'], ['/settings', 'Settings']]) {
+    const page = await h.get(path);
+    assert.match(page, /<meta name="viewport" content="width=device-width,initial-scale=1">/);
+    assert.match(page, new RegExp(`<a href="${path}" class="on" aria-current="page">${label}</a>`));
+    assert.equal((page.match(/aria-current="page"/g) ?? []).length, 1);
+    assert.doesNotMatch(page, /<script|<link|https?:\/\/(?!www\.w3\.org)|@import|url\(/i);
+  }
+});
+
+test('each tracking is a card with status, facts and Check now / Pause / Delete actions', async t => {
+  const h = await start(t, { tracked: { identifiers: [samples.cadastral, { ...samples.id, paused: true, label: 'Mom' }] } });
+  await h.post('/track/check', samples.cadastral);
+  await h.app.idle();
+  const page = await h.get('/');
+  assert.doesNotMatch(page, /<table/);
+  const cards = page.match(/<article class="card tracking">[\s\S]*?<\/article>/g);
+  assert.equal(cards.length, 2);
+  const [first, second] = cards;
+  assert.match(first, /class="t-id">01\.14\.16\.007\.381</);
+  assert.match(first, /class="pill">active</);
+  assert.match(first, /Last check[\s\S]*Last result[\s\S]*<span class="ok">OK<\/span>[\s\S]*Latest entry[\s\S]*20 Sep 2025, 12:00[\s\S]*Results/);
+  assert.match(first, /action="\/track\/check"[\s\S]*name="_csrf"[\s\S]*<button>Check now<\/button>/);
+  assert.match(first, /action="\/track\/pause"[\s\S]*<button>Pause<\/button>/);
+  assert.match(first, /<form method="get" action="\/track\/delete">[\s\S]*name="type" value="cadastral"[\s\S]*<button class="danger">Delete<\/button>/);
+  assert.match(second, /class="t-id">Mom</);
+  assert.match(second, /class="pill paused">paused</);
+  assert.match(second, /action="\/track\/resume"[\s\S]*<button>Resume<\/button>/);
+  assert.match(second, /not checked yet/);
+});
+
+test('dates are shown compactly in UTC', () => {
+  assert.equal(formatWhen('2026-10-20T10:45:30.123Z'), '20 Oct 2026, 10:45');
+  assert.equal(formatWhen('2025-01-05'), '5 Jan 2025');
+  assert.equal(formatWhen(null), '—');
+  assert.equal(formatWhen('<b>soon</b>'), '&lt;b&gt;soon&lt;/b&gt;');
+});
+
+test('new tracking offers three type choices, one form each, with unchanged field names', async t => {
+  const h = await start(t);
+  const page = await h.get('/new');
+  for (const type of ['cadastral', 'id', 'registration']) {
+    assert.match(page, new RegExp(`<input class="seg-radio" type="radio" name="kind" id="t-${type}" value="${type}"`));
+    assert.match(page, new RegExp(`<label for="t-${type}">`));
+    assert.match(page, new RegExp(`pane-${type}[\\s\\S]*?action="/track/add"[\\s\\S]*?name="type" value="${type}"[\\s\\S]*?id="v-${type}" name="value"`));
+  }
+  assert.equal((page.match(/checked>/g) ?? []).length, 1);
+  assert.match(page, /id="t-cadastral"[^>]* checked>/);
+  assert.equal((page.match(/<button class="primary">Add and run baseline check<\/button>/g) ?? []).length, 3);
+  const rejected = await h.post('/track/add', { type: 'id', value: 'abc' });
+  assert.equal(rejected.status, 400);
+  assert.match(await rejected.text(), /id="t-id"[^>]* checked>/);
+});
+
+test('settings keeps its field names and shows full-width Save and Send test message buttons', async t => {
+  const h = await start(t);
+  const page = await h.get('/settings');
+  for (const name of ['telegramBotToken', 'telegramChatId', 'intervalMinutes', 'clearTelegram']) assert.ok(page.includes(`name="${name}"`), name);
+  assert.match(page, /<button class="primary">Save settings<\/button>/);
+  assert.match(page, /action="\/settings\/test"[\s\S]*<button>Send test message<\/button>/);
+});
+
+// Real-browser layout check; needs the optional Playwright dependency and Chrome, otherwise it reports itself skipped.
+test('no horizontal overflow and visible tappable actions at 320px and 390px', async t => {
+  let chromium;
+  try { ({ chromium } = await import('playwright')); } catch { return t.skip('playwright not installed'); }
+  const executablePath = process.env.CHROME_PATH ?? '/usr/bin/google-chrome';
+  const browser = await chromium.launch({ executablePath, headless: true }).catch(() => null);
+  if (!browser) return t.skip('Chrome not available');
+  t.after(() => browser.close());
+  const long = { type: 'cadastral', value: '01.14.16.007.381', label: 'A very long label for a cadastral code (საკადასტრო კოდი) that must wrap' };
+  const h = await start(t, { tracked: { identifiers: [long, samples.id, { ...samples.registration, paused: true }] },
+    search: async () => { throw new Error('Search timed out '.repeat(8)); } });
+  await h.post('/track/check', samples.id);
+  await h.app.idle();
+  for (const width of [320, 390, 1280]) {
+    const page = await browser.newPage({ viewport: { width, height: 800 } });
+    for (const path of ['/', '/new', '/settings', `/track/delete?type=id&value=${samples.id.value}`]) {
+      await page.goto(h.app.url + path);
+      const m = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth }));
+      assert.ok(m.scroll <= m.client, `${path} overflows at ${width}px: ${m.scroll} > ${m.client}`);
+      for (const box of await page.locator('button:visible, nav a').evaluateAll(els => els.map(e => { const r = e.getBoundingClientRect(); return { text: e.textContent, left: r.left, right: r.right, height: r.height }; }))) {
+        assert.ok(box.left >= 0 && box.right <= width && box.height >= 40, `${path} ${width}px: ${JSON.stringify(box)}`);
+      }
+    }
+    await page.close();
+  }
 });
