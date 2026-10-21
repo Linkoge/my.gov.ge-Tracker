@@ -1,4 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
+import { SEARCH_BUDGET_MS } from './registry.mjs';
 import { StateStore, targetKey } from './state-store.mjs';
 import { entryMessage, safeError } from './notifications.mjs';
 
@@ -13,7 +14,9 @@ const FAILURE_DELAY_MS = 24 * 60 * 60 * 1000;
 async function recordCheckFailure({ target, message, store, logger, now }) {
   const key = targetKey(target);
   const time = now().toISOString();
-  const previous = (await store.readStatus())[key];
+  let previous;
+  try { previous = (await store.readStatus())[key]; }
+  catch (error) { logger.error(`Could not read check status: ${safeError(error)}`); }
   const failureSince = previous?.failureSince ?? time;
   const lastFailureNotifiedAt = previous?.lastFailureNotifiedAt;
   const due = Date.parse(time) - Date.parse(failureSince) >= FAILURE_DELAY_MS &&
@@ -22,7 +25,7 @@ async function recordCheckFailure({ target, message, store, logger, now }) {
     checkedAt: time, ok: false, count: previous?.count ?? null, error: message,
     failureSince, ...(lastFailureNotifiedAt ? { lastFailureNotifiedAt } : {}),
     ...(due ? { lastFailureNotifiedAt: time } : {}),
-  }).catch(() => {});
+  }).catch(error => logger.error(`Could not record check status for ${target.type} ${target.value}: ${safeError(error)}`));
   logger.error(message);
   return due ? { target, failureSince, error: message } : null;
 }
@@ -51,11 +54,51 @@ export function withDataLock(dataDir, task, store = new StateStore(dataDir)) {
 }
 
 // `targets` overrides the scheduled set (used by "Check now"); by default paused items are skipped.
-export function runOnce(options) {
-  return serialize(options.config.dataDir, () => checkTargets(options));
+const activity = new Map();
+export function checkState(dataDir, target) {
+  const states = activity.get(dataDir)?.get(targetKey(target));
+  return states?.some(t => t.state === 'checking') ? 'checking' : states?.length ? 'queued' : null;
 }
 
-async function checkTargets({ config, search, notify, targets, logger = console, store = new StateStore(config.dataDir), now = () => new Date() }) {
+export function runOnce(options) {
+  const active = options.targets ?? options.config.identifiers.filter(t => !t.paused);
+  const dir = options.config.dataDir;
+  if (!activity.has(dir)) activity.set(dir, new Map());
+  const map = activity.get(dir);
+  const tokens = active.map(target => {
+    const key = targetKey(target), token = { key, target, state: 'queued' };
+    const states = map.get(key) ?? [];
+    states.push(token); map.set(key, states);
+    return token;
+  });
+  const finish = target => {
+    const token = tokens.find(t => t.key === targetKey(target));
+    token.state = 'done';
+    const states = map.get(token.key);
+    states.splice(states.indexOf(token), 1);
+  };
+  return serialize(dir, () => checkTargets({ ...options, targets: active,
+    onTarget: target => { tokens.find(t => t.key === targetKey(target)).state = 'checking'; },
+    onFinished: finish,
+  })).finally(() => {
+    for (const token of tokens) {
+      if (token.state !== 'done') finish(token.target);
+      if (!map.get(token.key)?.length) map.delete(token.key);
+    }
+    if (!map.size) activity.delete(dir);
+  });
+}
+
+async function boundedSearch(search, target, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([Promise.resolve().then(() => search(target)), new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Search exceeded its ${timeoutMs}ms deadline`)), timeoutMs);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+async function checkTargets({ config, search, notify, targets, logger = console, store = new StateStore(config.dataDir), now = () => new Date(), searchTimeoutMs = SEARCH_BUDGET_MS + 5000, onTarget = () => {}, onFinished = () => {} }) {
   const report = { ok: true, identifiers: [] };
   const dueFailures = [];
   const active = targets ?? config.identifiers.filter(target => !target.paused);
@@ -66,8 +109,9 @@ async function checkTargets({ config, search, notify, targets, logger = console,
     const state = await store.read();
     for (const target of active) {
       try {
+        onTarget(target);
         // Search must finish and validate EVERY page before state can change.
-        const entries = await search(target);
+        const entries = await boundedSearch(search, target, searchTimeoutMs);
         if (!Array.isArray(entries) || entries.some(e => !e?.key || !e.date || !Number.isFinite(Date.parse(e.date)))) {
           throw new Error('Search returned invalid parsed entries');
         }
@@ -98,7 +142,7 @@ async function checkTargets({ config, search, notify, targets, logger = console,
           notified++;
         }
         if (tracked.testPending) { delete tracked.testPending; await store.write(state); }
-        await store.recordStatus(key, { checkedAt: tracked.lastCheckedAt, ok: true, count: entries.length, error: null }).catch(() => {});
+        await store.recordStatus(key, { checkedAt: tracked.lastCheckedAt, ok: true, count: entries.length, error: null });
         const result = { ...target, baselined, count: entries.length, latestDate: tracked.latestDate, notified };
         report.identifiers.push(result);
         logger.log(`${target.type} ${target.value}: ${baselined ? 'baseline saved' : 'checked'}; ${entries.length} results; latest ${tracked.latestDate ?? 'none'}; ${notified} notifications`);
@@ -108,12 +152,11 @@ async function checkTargets({ config, search, notify, targets, logger = console,
         report.identifiers.push({ ...target, error: message });
         const due = await recordCheckFailure({ target, message, store, logger, now });
         if (due) dueFailures.push(due);
-      }
+      } finally { onFinished(target); }
     }
   } catch (error) {
     report.ok = false;
-    const message = `my.gov.ge tracker failed: ${safeError(error, config.settings)}`;
-    report.ok = false;
+    logger.error(`my.gov.ge tracker failed: ${safeError(error, config.settings)}`);
     for (const target of active) {
       const targetMessage = `my.gov.ge check failed for ${target.type} ${target.value}: ${safeError(error, config.settings)}`;
       const due = await recordCheckFailure({ target, message: targetMessage, store, logger, now });

@@ -455,3 +455,34 @@ test('a failed check keeps the test pending marker and the notification is sent 
   assert.equal(h.messages.filter(m => m.includes('desc-c')).length, 1);
   assert.equal((await h.store.read()).targets[key].testPending, undefined);
 });
+
+test('throwing and hanging targets record errors and do not prevent later targets from recording success', async t => {
+  const identifiers = [target, { type: 'id', value: '01008048536' }, { type: 'cadastral', value: '82.01.44.932' }];
+  const h = await harness(t, identifiers);
+  const report = await runOnce({ ...h.options, searchTimeoutMs: 20, search: async item => {
+    if (item === identifiers[0]) throw new Error('upstream broke');
+    if (item === identifiers[1]) return new Promise(() => {});
+    return entries;
+  } });
+  assert.equal(report.identifiers.length, 3);
+  const status = await h.store.readStatus();
+  for (const item of identifiers) assert.equal(status[targetKey(item)].checkedAt, h.options.now().toISOString());
+  assert.match(status[targetKey(identifiers[0])].error, /upstream broke/);
+  assert.match(status[targetKey(identifiers[1])].error, /deadline/);
+  assert.equal(status[targetKey(identifiers[2])].ok, true);
+});
+
+test('status write failures are logged and isolated to their target', async t => {
+  const other = { type: 'cadastral', value: '82.01.44.932' };
+  const h = await harness(t, [target, other]);
+  const original = h.store.recordStatus.bind(h.store);
+  h.store.recordStatus = async (key, entry) => {
+    if (key === targetKey(target)) throw new Error('disk unavailable');
+    return original(key, entry);
+  };
+  const report = await runOnce({ ...h.options, store: h.store });
+  assert.equal(report.ok, false);
+  assert.equal(report.identifiers.length, 2);
+  assert.ok(h.errors.some(message => /Could not record check status.*disk unavailable/.test(message)));
+  assert.equal((await h.store.readStatus())[targetKey(other)].ok, true);
+});

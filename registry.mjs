@@ -6,6 +6,8 @@ import { safeError } from './notifications.mjs';
 
 export const SERVICE_URL = 'https://www.my.gov.ge/ka-ge/services/10/service/176';
 export const SEARCH_URL = 'https://naprweb.reestri.gov.ge/api/search';
+export const SEARCH_BUDGET_MS = 90000;
+const SEARCH_RESPONSE_MS = 30000;
 const iframe = 'iframe[src*="naprweb.reestri.gov.ge"]';
 
 export async function openBrowserContext(config, profileDir = join(config.dataDir, 'browser')) {
@@ -47,7 +49,7 @@ export async function loginWithCredentials(page, { settings, timeoutMs, getCode 
   if (page.url().includes('/account/login')) throw new Error('Login failed: authentication did not complete');
 }
 
-async function openSearch(page, target, config) {
+export async function openSearch(page, target, config, deadline = Date.now() + SEARCH_BUDGET_MS) {
   const field = `input[ng-model="searchForm.${identifierFields[target.type]}"]`;
   const navigate = async () => {
     const response = await page.goto(SERVICE_URL, { waitUntil: 'domcontentloaded' });
@@ -60,21 +62,34 @@ async function openSearch(page, target, config) {
     await loginWithCredentials(page, config);
     await navigate();
   }
-  const frame = page.frameLocator(iframe);
-  await frame.locator('button').filter({ hasText: 'თავიდან' }).click();
-  // Clear restored Angular search filters so exactly ONE identifier is submitted.
-  for (const name of ['regno', 'person', 'address', 'cadcode']) {
-    await frame.locator(`input[ng-model="searchForm.${name}"]`).fill(name === identifierFields[target.type] ? target.value : '');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) await navigate();
+    const frame = page.frameLocator(iframe);
+    await frame.locator('button').filter({ hasText: 'თავიდან' }).click();
+    // Clear restored Angular search filters so exactly ONE identifier is submitted.
+    for (const name of ['regno', 'person', 'address', 'cadcode']) {
+      const input = frame.locator(`input[ng-model="searchForm.${name}"]`);
+      await input.fill(name === identifierFields[target.type] ? target.value : '');
+      // Commit Angular updateOn: blur models, including cleared filters and person.
+      await input.blur();
+    }
+    // Playwright's click waits for the submit button to become enabled after validation.
+    let response;
+    try {
+      const pending = page.waitForResponse(response => response.url().split('?')[0] === SEARCH_URL && response.request().method() === 'POST',
+        { timeout: Math.max(1, Math.min(SEARCH_RESPONSE_MS, deadline - Date.now())) });
+      [response] = await Promise.all([pending, frame.locator('button[type="submit"]').click()]);
+    } catch (error) {
+      if (attempt === 0 && error.name === 'TimeoutError' && Date.now() < deadline) continue;
+      throw error;
+    }
+    const payload = response.request().postDataJSON();
+    if (payload?.[identifierFields[target.type]] !== target.value || ['regno', 'person', 'address', 'cadcode'].some(name =>
+      name !== identifierFields[target.type] && payload[name]) || payload.datefrom || payload.dateto || payload.search || payload.page !== 1) {
+      throw new Error('Search failed: form did not submit exactly the configured identifier on page one');
+    }
+    return { response, payload };
   }
-  const pending = page.waitForResponse(response => response.url().split('?')[0] === SEARCH_URL && response.request().method() === 'POST');
-  // Await both promises so a failed click cannot leave an unhandled waiter.
-  const [response] = await Promise.all([pending, frame.locator('button[type="submit"]').click()]);
-  const payload = response.request().postDataJSON();
-  if (payload?.[identifierFields[target.type]] !== target.value || ['regno', 'person', 'address', 'cadcode'].some(name =>
-    name !== identifierFields[target.type] && payload[name]) || payload.datefrom || payload.dateto || payload.search || payload.page !== 1) {
-    throw new Error('Search failed: form did not submit exactly the configured identifier on page one');
-  }
-  return { response, payload };
 }
 
 export async function readSearchResponse(response, page) {
@@ -85,31 +100,45 @@ export async function readSearchResponse(response, page) {
   return parseResultPage(json, page);
 }
 
-export async function searchRegistry(target, config, { openContext = openBrowserContext } = {}) {
+export async function searchRegistry(target, config, { openContext = openBrowserContext, budgetMs = SEARCH_BUDGET_MS } = {}) {
   validateTargets([target]);
   let context;
   let phase = 'browser startup';
-  let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; void context?.close().catch(() => {}); }, 55000);
-  try {
+  const deadline = Date.now() + budgetMs;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Search timed out after ${budgetMs / 1000} seconds during ${phase}`)), budgetMs);
+  });
+  const work = async () => {
     context = await openContext(config);
+    if (Date.now() >= deadline) { void context.close().catch(() => {}); throw new Error('Search deadline expired'); }
     const page = context.pages()[0] ?? await context.newPage();
     phase = 'service/login/search submission';
-    const { response, payload } = await openSearch(page, target, config);
+    const { response, payload } = await openSearch(page, target, config, deadline);
     phase = 'result parsing';
     const pages = [await readSearchResponse(response, 1)];
     if (pages[0].lastPage > 1000) throw new Error('Search failed: more than 1000 pages; refusing an incomplete baseline');
     for (let number = 2; number <= pages[0].lastPage; number++) {
       phase = `search page ${number}`;
-      const next = await context.request.post(SEARCH_URL, { data: { ...payload, page: number }, timeout: config.timeoutMs });
+      const next = await context.request.post(SEARCH_URL, { data: { ...payload, page: number }, timeout: Math.max(1, Math.min(SEARCH_RESPONSE_MS, deadline - Date.now())) });
       pages.push(await readSearchResponse(next, number));
     }
     return completeResults(pages);
+  };
+  try {
+    return await Promise.race([work(), timeout]);
   } catch (error) {
-    if (timedOut) throw new Error(`Search timed out after 55 seconds during ${phase}`);
     throw new Error(`${phase}: ${safeError(error, config.settings)}`);
   } finally {
     clearTimeout(timer);
-    if (context) await context.close();
+    // Browser cleanup must not keep the queue blocked.
+    if (context) {
+      let cleanupTimer;
+      try {
+        await Promise.race([context.close().catch(() => {}), new Promise(resolve => {
+          cleanupTimer = setTimeout(resolve, 2000);
+        })]);
+      } finally { clearTimeout(cleanupTimer); }
+    }
   }
 }

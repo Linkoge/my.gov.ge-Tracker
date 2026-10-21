@@ -98,7 +98,7 @@ export function trackingsPage({ rows, csrf, problem }) {
   const cards = rows.map(r => {
     const names = typeNames[r.type];
     const fields = { type: r.type, value: r.value };
-    const state = (r.running ? '<span class="pill busy">checking…</span>' : r.paused ? '<span class="pill paused">paused</span>' : '<span class="pill">active</span>') +
+    const state = (r.running ? `<span class="pill busy">${r.checkState === 'queued' ? 'Queued…' : 'Checking…'}</span>` : r.paused ? '<span class="pill paused">paused</span>' : '<span class="pill">active</span>') +
       (r.testPending ? ' <span class="pill test">Test pending</span>' : '');
     const result = !r.check ? '<span class="muted">not checked yet</span>'
       : r.check.ok ? '<span class="ok">OK</span>' : `<span class="err">${escapeHtml(r.check.error)}</span>`;

@@ -6,7 +6,7 @@ import { createNotifier, safeError } from './notifications.mjs';
 import { describeSettings, loadRuntime } from './runtime.mjs';
 import { StateStore, targetKey } from './state-store.mjs';
 import { TargetsStore } from './targets-store.mjs';
-import { Waker, runLoop, runOnce, withDataLock } from './tracking.mjs';
+import { Waker, runLoop, runOnce, withDataLock, checkState } from './tracking.mjs';
 import { SettingsStore, applyUiSettings, validateUiSettings } from './ui-settings.mjs';
 import { deletePage, layout, testAlertPage, newPage, settingsPage, trackingsPage } from './ui-pages.mjs';
 
@@ -68,8 +68,10 @@ export function createApp({
     const job = (async () => {
       try {
         if (!(await targets.list()).some(t => targetKey(t) === key)) return;
-        await runOnce({ ...(await runOptions()), targets: [target] });
-      } catch (error) { logger.error(`Check failed: ${safeError(error)}`); }
+        const report = await runOnce({ ...(await runOptions()), targets: [target] });
+        flash = report.ok ? { kind: 'ok', text: `Check completed for ${target.value}` }
+          : { kind: 'error', text: `Check failed for ${target.value}; see Last result` };
+      } catch (error) { logger.error(`Check failed: ${safeError(error)}`); flash = { kind: 'error', text: `Check failed for ${target.value}; see the server log` }; }
       finally { running.delete(key); }
     })();
     jobs.add(job);
@@ -88,7 +90,7 @@ export function createApp({
       const known = state.targets[key];
       const check = status[key] ?? (known?.lastCheckedAt ? { ok: true, checkedAt: known.lastCheckedAt, error: null } : null);
       const count = status[key]?.count ?? (known ? Object.keys(known.seen).length + Object.keys(known.pending).length : null);
-      return { ...target, running: running.has(key), check, count, latestDate: known?.latestDate ?? null, testPending: Boolean(known?.testPending) };
+      return { ...target, running: running.has(key) || Boolean(checkState(config.dataDir, target)), checkState: checkState(config.dataDir, target) ?? (running.has(key) ? 'queued' : null), check, count, latestDate: known?.latestDate ?? null, testPending: Boolean(known?.testPending) };
     });
     return { config, rows, problem };
   }
@@ -142,8 +144,8 @@ export function createApp({
   // Test mode: rewinds the stored baseline so the next check re-alerts the newest entry through the normal path.
   async function rewindForTest(target) {
     const key = targetKey(target);
-    if (running.has(key)) throw new UserError('A check is running for this tracking; try again when it finishes', 409);
     const config = await runtime();
+    if (running.has(key) || checkState(config.dataDir, target)) throw new UserError('A check is queued or running for this tracking; try again when it finishes', 409);
     let result;
     try { result = await withDataLock(config.dataDir, store => store.rewindBaseline(key)); }
     catch (error) { throw new UserError(safeError(error, config.settings), 409); }
@@ -177,7 +179,7 @@ export function createApp({
       }
       case 'GET /new': return page('New tracking', newPage({ csrf }), { active: 'new', flash: take() });
       case 'POST /track/add':
-        try { const target = await addTracking(form); return go('ok', `Added ${target.value}; the baseline check is running.`); }
+        try { const target = await addTracking(form); return go('ok', `Added ${target.value}; the baseline check is queued.`); }
         catch (error) {
           if (!(error instanceof UserError)) throw error;
           return { ...page('New tracking', newPage({ csrf, error: error.message, values: { type: form.get('type'), value: form.get('value'), label: form.get('label') } }), { active: 'new' }), status: 400 };
@@ -186,7 +188,7 @@ export function createApp({
       case 'POST /track/resume': await setPaused(await requireTarget(form), false); return go('ok', 'Resumed');
       case 'POST /track/check': {
         const target = await requireTarget(form);
-        return go('ok', startCheck(target) ? 'Check started' : 'A check is already running');
+        return go('ok', startCheck(target) ? 'Check queued; waiting for any current cycle to finish' : 'A check is already queued or checking');
       }
       case 'GET /track/test-alert': {
         const target = await requireTarget(url.searchParams);

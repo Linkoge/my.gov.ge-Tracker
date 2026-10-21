@@ -572,3 +572,56 @@ test('Test alert enforces CSRF and Origin and reports unusable trackings', async
   await h.post('/track/test-alert', samples.cadastral);
   assert.match(await h.get('/'), /already pending/);
 });
+
+test('manual check queues behind a cycle, shows progress and refreshes, then delivers an armed test alert', async t => {
+  const messages = [];
+  let release, entered, releaseManual, enteredManual;
+  const started = new Promise(resolve => { entered = resolve; });
+  const manualStarted = new Promise(resolve => { enteredManual = resolve; });
+  let block = false;
+  const h = await start(t, {
+    tracked: { identifiers: [samples.cadastral, samples.id] },
+    env: { TELEGRAM_BOT_TOKEN: 'test-' + randomBytes(12).toString('hex'), TELEGRAM_CHAT_ID: '42' },
+    fetchImpl: async (url, init) => { messages.push(JSON.parse(init.body).text); return { ok: true, json: async () => ({ ok: true }) }; },
+    search: async target => {
+      if (block && target.type === 'cadastral') {
+        await new Promise(resolve => { release = resolve; entered(); });
+      }
+      if (block && target.type === 'id') {
+        await new Promise(resolve => { releaseManual = resolve; enteredManual(); });
+      }
+      return [entry];
+    },
+  });
+  const config = await loadRuntime({ env: { TRACKER_ENV_FILE: '/dev/null' }, configPath: h.configPath, dataDir: h.dataDir });
+  await runOnce({ config, search: async () => [entry], notify: async () => {}, logger: quiet });
+  await h.post('/track/test-alert', samples.id);
+  assert.match(await h.get('/'), /Test pending/);
+  await h.post('/track/pause', samples.id);
+  block = true;
+  const controller = new AbortController();
+  const cycle = h.app.startScheduler(controller.signal, { sleep: async () => { controller.abort(); } });
+  await started;
+  // Queue the armed ID behind a scheduled cycle that only checks the other card.
+  await h.post('/track/check', samples.id);
+  let page = await h.get('/');
+  assert.match(page, /Check queued/);
+  assert.match(page, /Queued…/);
+  assert.match(page, /Checking…/);
+  assert.match(page, /Test pending/);
+  assert.match(page, /http-equiv="refresh"/);
+  release();
+  await cycle;
+  await manualStarted;
+  page = await h.get('/');
+  assert.match(page, /Checking…/);
+  assert.match(page, /Test pending/);
+  assert.match(page, /http-equiv="refresh"/);
+  assert.doesNotMatch(page, /Queued…/);
+  releaseManual();
+  await h.app.idle();
+  page = await h.get('/');
+  assert.match(page, /Check completed/);
+  assert.doesNotMatch(page, /Test pending|Queued…|Checking…|http-equiv="refresh"/);
+  assert.equal(messages.length, 1);
+});

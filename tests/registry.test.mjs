@@ -73,3 +73,46 @@ test('a malformed later page fails the entire browser search', { timeout: 30000 
   const { result } = await offlineSearch(t, { type: 'cadastral', value: '01.14.16.007.381' }, { failPageTwo: true });
   await assert.rejects(result, /expected applist array/);
 });
+
+test('search response has a dedicated longer wait and retries once after a missing response for every identifier type', async () => {
+  const { openSearch, SEARCH_BUDGET_MS } = await import('../registry.mjs');
+  assert.equal(SEARCH_BUDGET_MS, 90000);
+  for (const type of ['id', 'cadastral', 'registration']) {
+    const target = { type, value: type === 'cadastral' ? '82.01.44.932' : '01008048536' };
+    const values = {}, waits = [];
+    let navigations = 0, clicks = 0, blurred = false;
+    const locator = selector => ({
+      waitFor: async () => {}, filter() { return this; },
+      fill: async value => { values[selector.match(/searchForm\.(\w+)/)[1]] = value; },
+      blur: async () => { blurred = true; },
+      click: async () => { if (selector.includes('submit')) { assert.ok(blurred); clicks++; } },
+    });
+    const response = { url: () => SEARCH_URL, request: () => ({ method: () => 'POST', postDataJSON: () => ({ ...values, page: 1 }) }) };
+    const page = {
+      goto: async () => { navigations++; return { ok: () => true }; },
+      frameLocator: () => ({ locator }),
+      waitForResponse: async (predicate, options) => {
+        waits.push(options.timeout);
+        if (waits.length === 1) { const error = new Error('no response'); error.name = 'TimeoutError'; throw error; }
+        assert.ok(predicate(response)); return response;
+      },
+    };
+    const result = await openSearch(page, target, { timeoutMs: 15000 });
+    assert.equal(result.payload[identifierFields[type]], target.value);
+    assert.deepEqual(waits, [30000, 30000]);
+    assert.equal(navigations, 2);
+    assert.equal(clicks, 2);
+  }
+});
+
+test('the overall search deadline rejects even when browser work never settles and closes the context', async () => {
+  let closed = false;
+  await assert.rejects(searchRegistry({ type: 'id', value: '01008048536' }, { settings: {} }, {
+    budgetMs: 20,
+    openContext: async () => ({
+      pages: () => [], newPage: () => new Promise(() => {}),
+      close: async () => { closed = true; },
+    }),
+  }), /Search timed out/);
+  assert.equal(closed, true);
+});
