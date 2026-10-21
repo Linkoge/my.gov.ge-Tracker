@@ -126,13 +126,12 @@ test('an empty successful baseline still notifies for a later first result', asy
   assert.equal((await h.run()).identifiers[0].notified, 2);
 });
 
-test('search/login/parsing errors are logged/notified and never establish or advance baseline', async t => {
+test('search/login/parsing errors are logged and never establish or advance baseline', async t => {
   const h = await harness(t);
   for (const message of ['Login requires a verification code', 'Search timed out', 'Parsing failed: expected applist']) {
     h.setResults(new Error(message));
     assert.equal((await h.run()).ok, false);
     assert.deepEqual((await h.store.read()).targets, {});
-    assert.ok(h.messages.at(-1).includes(message));
     assert.ok(h.errors.at(-1).includes(message));
   }
   h.setResults(entries);
@@ -143,6 +142,49 @@ test('search/login/parsing errors are logged/notified and never establish or adv
   assert.equal(await readFile(h.store.path, 'utf8'), before);
   h.setResults(entries);
   assert.equal((await h.run()).identifiers[0].notified, 0);
+});
+
+test('failure notifications wait 24 hours, send once per day, reset on success, and persist across reload', async t => {
+  const h = await harness(t);
+  let clock = Date.parse('2026-10-17T12:00:00Z');
+  h.options.now = () => new Date(clock);
+  h.setResults(new Error('temporary outage'));
+  await h.run();
+  assert.deepEqual(h.messages, []);
+  let status = (await h.store.readStatus())[targetKey(target)];
+  assert.equal(status.failureSince, '2026-10-17T12:00:00.000Z');
+
+  clock += 24 * 60 * 60 * 1000 - 1;
+  await h.run();
+  assert.deepEqual(h.messages, []);
+  clock++;
+  await h.run();
+  assert.equal(h.messages.length, 1);
+  assert.ok(h.messages[0].includes('temporary outage'));
+  await h.run();
+  assert.equal(h.messages.length, 1);
+
+  // A fresh StateStore instance reads the same persisted streak and notification marker.
+  h.options.store = new StateStore(h.options.config.dataDir);
+  clock += 24 * 60 * 60 * 1000 - 1;
+  await h.run();
+  assert.equal(h.messages.length, 1);
+  clock++;
+  await h.run();
+  assert.equal(h.messages.length, 2);
+
+  h.setResults(entries);
+  await h.run();
+  status = (await h.store.readStatus())[targetKey(target)];
+  assert.equal(status.failureSince, undefined);
+  assert.equal(status.lastFailureNotifiedAt, undefined);
+
+  h.setResults(new Error('new streak'));
+  clock += 1000;
+  await h.run();
+  status = (await h.store.readStatus())[targetKey(target)];
+  assert.equal(status.failureSince, new Date(clock).toISOString());
+  assert.equal(h.messages.length, 2);
 });
 
 test('one failed identifier does not block a second identifier baseline', async t => {
@@ -179,13 +221,13 @@ test('delivery failures persist outbox, retry disappearing entries, and preserve
   assert.equal((await h.run()).identifiers[0].notified, 0);
 });
 
-test('both search and notification errors remain visible even with Telegram down', async t => {
+test('failure stays visible in logs without attempting an early Telegram alert', async t => {
   const h = await harness(t);
   h.setResults(new Error('registry unavailable'));
   h.options.notify = async () => { throw Error('Telegram unavailable'); };
   assert.equal((await h.run()).ok, false);
   assert.ok(h.errors.some(e => e.includes('registry unavailable')));
-  assert.ok(h.errors.some(e => e.includes('Failure notification also failed')));
+  assert.deepEqual(h.messages, []);
 });
 
 test('corrupt state and a held lock fail visibly without silently rebaselining', async t => {

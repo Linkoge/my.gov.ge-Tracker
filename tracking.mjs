@@ -8,6 +8,28 @@ export async function reportFailure(message, { notify, logger = console }) {
   catch (error) { logger.error(`Failure notification also failed: ${safeError(error)}`); }
 }
 
+const FAILURE_DELAY_MS = 24 * 60 * 60 * 1000;
+
+async function recordCheckFailure({ target, message, store, notify, logger, now }) {
+  const key = targetKey(target);
+  const time = now().toISOString();
+  const previous = (await store.readStatus())[key];
+  const failureSince = previous?.failureSince ?? time;
+  const lastFailureNotifiedAt = previous?.lastFailureNotifiedAt;
+  const due = Date.parse(time) - Date.parse(failureSince) >= FAILURE_DELAY_MS &&
+    (!lastFailureNotifiedAt || Date.parse(time) - Date.parse(lastFailureNotifiedAt) >= FAILURE_DELAY_MS);
+  await store.recordStatus(key, {
+    checkedAt: time, ok: false, count: previous?.count ?? null, error: message,
+    failureSince, ...(lastFailureNotifiedAt ? { lastFailureNotifiedAt } : {}),
+    ...(due ? { lastFailureNotifiedAt: time } : {}),
+  }).catch(() => {});
+  logger.error(message);
+  if (due) {
+    try { await notify(message); }
+    catch (error) { logger.error(`Failure notification also failed: ${safeError(error)}`); }
+  }
+}
+
 // In-process queue per data directory so UI actions and the scheduler never overlap.
 const chains = new Map();
 export function serialize(dataDir, task) {
@@ -80,16 +102,17 @@ async function checkTargets({ config, search, notify, targets, logger = console,
         const message = `my.gov.ge check failed for ${target.type} ${target.value}: ${safeError(error, config.settings)}`;
         report.ok = false;
         report.identifiers.push({ ...target, error: message });
-        const previous = (await store.readStatus())[targetKey(target)];
-        await store.recordStatus(targetKey(target), {
-          checkedAt: now().toISOString(), ok: false, count: previous?.count ?? null, error: message,
-        }).catch(() => {});
-        await reportFailure(message, { notify, logger });
+        await recordCheckFailure({ target, message, store, notify, logger, now });
       }
     }
   } catch (error) {
     report.ok = false;
-    await reportFailure(`my.gov.ge tracker failed: ${safeError(error, config.settings)}`, { notify, logger });
+    const message = `my.gov.ge tracker failed: ${safeError(error, config.settings)}`;
+    report.ok = false;
+    for (const target of active) {
+      const targetMessage = `my.gov.ge check failed for ${target.type} ${target.value}: ${safeError(error, config.settings)}`;
+      await recordCheckFailure({ target, message: targetMessage, store, notify, logger, now });
+    }
   } finally {
     if (unlock) await unlock();
   }
