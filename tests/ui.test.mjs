@@ -495,11 +495,11 @@ test('top navigation and visible tappable actions at 320px, 390px and desktop', 
         const nav = document.querySelector('nav.tabs').getBoundingClientRect();
         const header = document.querySelector('header').getBoundingClientRect();
         return { scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth,
-          navTop: nav.top, navBottom: nav.bottom, headerBottom: header.bottom, viewportBottom: innerHeight,
+          navTop: nav.top, navBottom: nav.bottom, headerTop: header.top, headerBottom: header.bottom, viewportBottom: innerHeight,
           position: getComputedStyle(document.querySelector('nav.tabs')).position };
       });
       assert.ok(m.scroll <= m.client, `${path} overflows at ${width}px: ${m.scroll} > ${m.client}`);
-      assert.ok(m.navTop >= m.headerBottom - 1 && m.navBottom <= m.headerBottom + 1, `${path} nav is outside header at ${width}px`);
+      assert.ok(m.navTop >= m.headerTop - 1 && m.navBottom <= m.headerBottom + 1, `${path} nav is outside header at ${width}px`);
       assert.notEqual(m.position, 'fixed', `${path} nav must not be fixed at ${width}px`);
       assert.ok(m.navBottom < m.viewportBottom, `${path} nav overlaps page bottom at ${width}px`);
       for (const box of await page.locator('button:visible, nav a').evaluateAll(els => els.map(e => { const r = e.getBoundingClientRect(); return { text: e.textContent, left: r.left, right: r.right, height: r.height }; }))) {
