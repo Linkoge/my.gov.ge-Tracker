@@ -64,7 +64,7 @@ node ui.mjs --no-scheduler       # manage only; checks run via "Check now"
 
 `npm run ui` is the same as `node ui.mjs`. Options: `--port`, `--host`, `--config tracked.json`, `--data-dir PATH`, `--no-scheduler`. The server binds to `127.0.0.1` by default and **refuses non-loopback hosts** (`127.0.0.1`, `::1`, `localhost` only) because it has no login; it also rejects foreign `Host`/`Origin` headers and requires a per-start form token on every POST. Do not run `ui.mjs` and `tracker.mjs loop` on the same data directory at the same time (the data-directory lock would make one of them report errors).
 
-The layout is mobile-first and needs no external assets or scripts (inline CSS only): a bottom tab bar on phones that becomes a top navigation on wider screens, with the active page marked, and no horizontal scrolling down to 320px. Dates are shown compactly in UTC (e.g. `20 Oct 2026, 10:45`).
+The layout is mobile-first and needs no external assets or scripts (inline CSS only): orange header and accent styling with a sticky tab navigation at the top on phones and wider screens, with the active page marked, and no horizontal scrolling down to 320px. Dates are shown compactly in UTC (e.g. `20 Oct 2026, 10:45`).
 
 Pages:
 

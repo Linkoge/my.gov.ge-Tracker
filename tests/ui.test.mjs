@@ -414,6 +414,10 @@ test('pages are mobile-first: viewport meta, no external assets, active tab mark
     assert.match(page, /<meta name="viewport" content="width=device-width,initial-scale=1">/);
     assert.match(page, new RegExp(`<a href="${path}" class="on" aria-current="page">${label}</a>`));
     assert.equal((page.match(/aria-current="page"/g) ?? []).length, 1);
+    assert.match(page, /--accent:#c2410c/);
+    assert.match(page, /--accent-dark:#9a3412/);
+    assert.match(page, /header\{position:sticky;top:0/);
+    assert.doesNotMatch(page, /nav\.tabs\{[^}]*position:\s*fixed[^}]*bottom\s*:/);
     assert.doesNotMatch(page, /<script|<link|https?:\/\/(?!www\.w3\.org)|@import|url\(/i);
   }
 });
@@ -471,7 +475,7 @@ test('settings keeps its field names and shows full-width Save and Send test mes
 });
 
 // Real-browser layout check; needs the optional Playwright dependency and Chrome, otherwise it reports itself skipped.
-test('no horizontal overflow and visible tappable actions at 320px and 390px', async t => {
+test('top navigation and visible tappable actions at 320px, 390px and desktop', async t => {
   let chromium;
   try { ({ chromium } = await import('playwright')); } catch { return t.skip('playwright not installed'); }
   const executablePath = process.env.CHROME_PATH ?? '/usr/bin/google-chrome';
@@ -487,8 +491,17 @@ test('no horizontal overflow and visible tappable actions at 320px and 390px', a
     const page = await browser.newPage({ viewport: { width, height: 800 } });
     for (const path of ['/', '/new', '/settings', `/track/delete?type=id&value=${samples.id.value}`]) {
       await page.goto(h.app.url + path);
-      const m = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth }));
+      const m = await page.evaluate(() => {
+        const nav = document.querySelector('nav.tabs').getBoundingClientRect();
+        const header = document.querySelector('header').getBoundingClientRect();
+        return { scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth,
+          navTop: nav.top, navBottom: nav.bottom, headerBottom: header.bottom, viewportBottom: innerHeight,
+          position: getComputedStyle(document.querySelector('nav.tabs')).position };
+      });
       assert.ok(m.scroll <= m.client, `${path} overflows at ${width}px: ${m.scroll} > ${m.client}`);
+      assert.ok(m.navTop >= m.headerBottom - 1 && m.navBottom <= m.headerBottom + 1, `${path} nav is outside header at ${width}px`);
+      assert.notEqual(m.position, 'fixed', `${path} nav must not be fixed at ${width}px`);
+      assert.ok(m.navBottom < m.viewportBottom, `${path} nav overlaps page bottom at ${width}px`);
       for (const box of await page.locator('button:visible, nav a').evaluateAll(els => els.map(e => { const r = e.getBoundingClientRect(); return { text: e.textContent, left: r.left, right: r.right, height: r.height }; }))) {
         assert.ok(box.left >= 0 && box.right <= width && box.height >= 40, `${path} ${width}px: ${JSON.stringify(box)}`);
       }

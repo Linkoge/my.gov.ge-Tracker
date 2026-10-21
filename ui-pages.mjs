@@ -23,17 +23,17 @@ const when = iso => iso ? `<time datetime="${escapeHtml(iso)}" title="UTC">${for
 
 const css = `
 *,*::before,*::after{box-sizing:border-box}
-:root{--accent:#1f55c4;--accent-dark:#173f94;--ink:#1a2233;--muted:#5a6475;--line:#dde2ea;--bg:#f3f5f9;--card:#fff;--ok:#146c2e;--ok-bg:#e1f4e7;--err:#a31c1c;--err-bg:#fdeaea;--warn:#7a5200;--warn-bg:#fff1d2;--shadow:0 1px 2px rgba(20,30,50,.06),0 4px 14px rgba(20,30,50,.07)}
+:root{--accent:#c2410c;--accent-dark:#9a3412;--accent-tint:#ffedd5;--ink:#1a2233;--muted:#5a6475;--line:#dde2ea;--bg:#f3f5f9;--card:#fff;--ok:#146c2e;--ok-bg:#e1f4e7;--err:#a31c1c;--err-bg:#fdeaea;--warn:#7a5200;--warn-bg:#fff1d2;--shadow:0 1px 2px rgba(20,30,50,.06),0 4px 14px rgba(20,30,50,.07)}
 html{-webkit-text-size-adjust:100%}
-body{font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans Georgian",sans-serif;margin:0;background:var(--bg);color:var(--ink);overflow-wrap:anywhere;padding-bottom:72px}
+body{font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans Georgian",sans-serif;margin:0;background:var(--bg);color:var(--ink);overflow-wrap:anywhere}
 a{color:var(--accent)}
-:focus-visible{outline:3px solid #f0a500;outline-offset:2px}
-header{background:var(--accent-dark);color:#fff;padding:12px 16px}
-header .bar{max-width:1100px;margin:0 auto;display:flex;align-items:center;gap:16px}
+:focus-visible{outline:3px solid #fb923c;outline-offset:2px}
+header{position:sticky;top:0;z-index:5;background:var(--accent-dark);color:#fff;padding:12px 16px}
+header .bar{max-width:1100px;margin:0 auto;display:flex;flex-direction:column;align-items:stretch;gap:8px}
 header h1{font-size:18px;line-height:1.2;margin:0;font-weight:700;letter-spacing:.2px}
-nav.tabs{position:fixed;left:0;right:0;bottom:0;z-index:5;display:flex;background:var(--card);border-top:1px solid var(--line);box-shadow:0 -2px 10px rgba(20,30,50,.08);padding-bottom:env(safe-area-inset-bottom)}
-nav.tabs a{flex:1 1 0;min-width:0;text-align:center;padding:14px 4px;min-height:48px;color:var(--muted);text-decoration:none;font-size:14px;font-weight:600;border-top:3px solid transparent}
-nav.tabs a.on{color:var(--accent);border-top-color:var(--accent);background:#eef3fd}
+nav.tabs{display:flex;gap:4px;margin:0 -4px}
+nav.tabs a{flex:1 1 0;min-width:0;text-align:center;padding:8px 4px;min-height:44px;color:#ffedd5;text-decoration:none;font-size:14px;font-weight:600;border-radius:8px}
+nav.tabs a.on{color:var(--accent-dark);background:var(--accent-tint)}
 main{max-width:1100px;margin:0 auto;padding:16px}
 h2{font-size:22px;line-height:1.25;margin:4px 0 12px}h3{font-size:17px;margin:0 0 8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:16px;box-shadow:var(--shadow)}
@@ -53,7 +53,7 @@ dl.facts dt{color:var(--muted);font-size:14px}dl.facts dd{margin:0;text-align:ri
 .actions form{display:flex;margin:0}
 button,.btn{font:inherit;font-weight:600;overflow-wrap:normal;word-break:normal;min-height:48px;padding:10px 6px;border:1px solid #9aa6bb;border-radius:10px;background:#fff;color:var(--ink);cursor:pointer;width:100%;text-align:center;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
 button:hover,.btn:hover{background:#eef2f8}
-button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}button.primary:hover{background:var(--accent-dark)}
+button.primary,.btn.primary{background:var(--accent-dark);color:#fff;border-color:var(--accent-dark)}button.primary:hover,.btn.primary:hover{background:#7c2d12}
 button.danger{background:#fff;color:var(--err);border-color:#e0a3a3}button.danger:hover{background:var(--err-bg)}
 .stack{display:flex;flex-direction:column;gap:12px;align-items:stretch}
 label{display:block;margin:14px 0 4px;font-weight:600}
@@ -67,14 +67,12 @@ input[type=checkbox]{width:22px;height:22px;flex:none}
 .seg label span{display:block;font-size:12px;opacity:.85}
 .seg label{margin:0;padding:10px 4px;min-height:48px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;border-radius:9px;font-size:14px;line-height:1.25;color:var(--muted);cursor:pointer}
 .pane{display:none}
-${['cadastral', 'id', 'registration'].map(t => `#t-${t}:checked ~ .seg label[for=t-${t}]{background:var(--card);color:var(--accent);box-shadow:0 1px 3px rgba(20,30,50,.18)}#t-${t}:focus-visible ~ .seg label[for=t-${t}]{outline:3px solid #f0a500}#t-${t}:checked ~ .panes .pane-${t}{display:block}`).join('\n')}
+${['cadastral', 'id', 'registration'].map(t => `#t-${t}:checked ~ .seg label[for=t-${t}]{background:var(--card);color:var(--accent-dark);box-shadow:0 1px 3px rgba(20,30,50,.18)}#t-${t}:focus-visible ~ .seg label[for=t-${t}]{outline:3px solid #fb923c}#t-${t}:checked ~ .panes .pane-${t}{display:block}`).join('\n')}
 .empty{text-align:center;padding:28px 16px}
 @media (min-width:640px){
-  body{padding-bottom:0}
-  header .bar{gap:28px;padding:0 24px}
-  nav.tabs{position:static;background:none;border:0;box-shadow:none;padding:0;display:flex;gap:4px;margin-left:auto}
-  nav.tabs a{flex:none;padding:10px 16px;min-height:0;color:#d5e2ff;border:0;border-radius:8px}
-  nav.tabs a.on{background:#fff;color:var(--accent-dark)}
+  header .bar{flex-direction:row;align-items:center;gap:28px;padding:0 24px}
+  nav.tabs{margin-left:auto}
+  nav.tabs a{flex:none;padding:10px 16px;min-height:0}
   main{padding:24px}
   .cards{grid-template-columns:repeat(auto-fill,minmax(340px,1fr))}
   .form-actions{grid-template-columns:auto auto;justify-content:start}
