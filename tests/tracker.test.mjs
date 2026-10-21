@@ -187,6 +187,61 @@ test('failure notifications wait 24 hours, send once per day, reset on success, 
   assert.equal(h.messages.length, 2);
 });
 
+test('failure streaks are independent and due failures are combined once per cycle', async t => {
+  const other = { type: 'id', value: '00000000000' };
+  const h = await harness(t, [target, other]);
+  let clock = Date.parse('2026-10-17T12:00:00Z');
+  h.options.now = () => new Date(clock);
+  h.options.search = async identifier => {
+    if (identifier.type === 'cadastral') throw Error('cadastral unavailable');
+    return entries;
+  };
+  await h.run();
+  let statuses = await h.store.readStatus();
+  assert.equal(statuses[targetKey(target)].failureSince, new Date(clock).toISOString());
+  assert.equal(statuses[targetKey(other)].failureSince, undefined);
+  assert.deepEqual(h.messages, []);
+
+  // A successful identifier clears only its own status, without disturbing the outage.
+  h.options.search = async identifier => {
+    if (identifier.type === 'id') throw Error('ID unavailable');
+    return entries;
+  };
+  clock += 60 * 60 * 1000;
+  await h.run();
+  statuses = await h.store.readStatus();
+  assert.equal(statuses[targetKey(target)].failureSince, undefined);
+  assert.equal(statuses[targetKey(other)].failureSince, new Date(clock).toISOString());
+
+  // Manual Check now selects only one tracking and uses its own persisted streak.
+  h.options.search = async () => { throw Error('manual outage'); };
+  clock += 24 * 60 * 60 * 1000;
+  await runOnce({ ...h.options, targets: [target] });
+  assert.deepEqual(h.messages, []);
+  await runOnce({ ...h.options, targets: [other] });
+  assert.equal(h.messages.length, 1);
+  assert.match(h.messages[0], /id 00000000000/);
+  assert.match(h.messages[0], /Failing since: 2026-10-17T13:00:00\.000Z/);
+  assert.match(h.messages[0], /manual outage/);
+  assert.doesNotMatch(h.messages[0], /cadastral/);
+});
+
+test('multiple failures crossing 24 hours in one cycle send exactly one combined message', async t => {
+  const other = { type: 'application', value: 'ABC123' };
+  const h = await harness(t, [target, other]);
+  let clock = Date.parse('2026-10-17T12:00:00Z');
+  h.options.now = () => new Date(clock);
+  h.options.search = async identifier => { throw Error(`${identifier.type} offline`); };
+  await h.run();
+  assert.deepEqual(h.messages, []);
+  clock += 24 * 60 * 60 * 1000;
+  await h.run();
+  assert.equal(h.messages.length, 1);
+  assert.match(h.messages[0], /cadastral 01\.14\.16\.007\.381[\s\S]*Failing since: 2026-10-17T12:00:00\.000Z[\s\S]*Last error: my\.gov\.ge check failed for cadastral[\s\S]*application ABC123[\s\S]*Last error: my\.gov\.ge check failed for application/);
+  await h.run();
+  assert.equal(h.messages.length, 1);
+});
+
 test('one failed identifier does not block a second identifier baseline', async t => {
   const other = { type: 'id', value: '00000000000' };
   const h = await harness(t, [target, other]);

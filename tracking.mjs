@@ -10,7 +10,7 @@ export async function reportFailure(message, { notify, logger = console }) {
 
 const FAILURE_DELAY_MS = 24 * 60 * 60 * 1000;
 
-async function recordCheckFailure({ target, message, store, notify, logger, now }) {
+async function recordCheckFailure({ target, message, store, logger, now }) {
   const key = targetKey(target);
   const time = now().toISOString();
   const previous = (await store.readStatus())[key];
@@ -24,10 +24,13 @@ async function recordCheckFailure({ target, message, store, notify, logger, now 
     ...(due ? { lastFailureNotifiedAt: time } : {}),
   }).catch(() => {});
   logger.error(message);
-  if (due) {
-    try { await notify(message); }
-    catch (error) { logger.error(`Failure notification also failed: ${safeError(error)}`); }
-  }
+  return due ? { target, failureSince, error: message } : null;
+}
+
+function combinedFailureMessage(failures) {
+  return `my.gov.ge check failures (${failures.length}):\n\n` + failures.map(({ target, failureSince, error }) =>
+    `${target.type} ${target.value}\nFailing since: ${failureSince}\nLast error: ${error}`
+  ).join('\n\n');
 }
 
 // In-process queue per data directory so UI actions and the scheduler never overlap.
@@ -54,6 +57,7 @@ export function runOnce(options) {
 
 async function checkTargets({ config, search, notify, targets, logger = console, store = new StateStore(config.dataDir), now = () => new Date() }) {
   const report = { ok: true, identifiers: [] };
+  const dueFailures = [];
   const active = targets ?? config.identifiers.filter(target => !target.paused);
   if (!active.length) return report;
   let unlock;
@@ -102,7 +106,8 @@ async function checkTargets({ config, search, notify, targets, logger = console,
         const message = `my.gov.ge check failed for ${target.type} ${target.value}: ${safeError(error, config.settings)}`;
         report.ok = false;
         report.identifiers.push({ ...target, error: message });
-        await recordCheckFailure({ target, message, store, notify, logger, now });
+        const due = await recordCheckFailure({ target, message, store, logger, now });
+        if (due) dueFailures.push(due);
       }
     }
   } catch (error) {
@@ -111,10 +116,15 @@ async function checkTargets({ config, search, notify, targets, logger = console,
     report.ok = false;
     for (const target of active) {
       const targetMessage = `my.gov.ge check failed for ${target.type} ${target.value}: ${safeError(error, config.settings)}`;
-      await recordCheckFailure({ target, message: targetMessage, store, notify, logger, now });
+      const due = await recordCheckFailure({ target, message: targetMessage, store, logger, now });
+      if (due) dueFailures.push(due);
     }
   } finally {
     if (unlock) await unlock();
+  }
+  if (dueFailures.length) {
+    try { await notify(combinedFailureMessage(dueFailures)); }
+    catch (error) { logger.error(`Failure notification also failed: ${safeError(error)}`); }
   }
   return report;
 }
