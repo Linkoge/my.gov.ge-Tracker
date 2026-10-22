@@ -67,9 +67,9 @@ test('adding each identifier type saves it and runs a silent baseline check', as
   assert.match(page, /Latest entry/);
 });
 
-test('cadastral codes accept any nonempty text, trim whitespace and reject duplicates', async t => {
+test('cadastral codes require a dot without other format or length restrictions', async t => {
   const h = await start(t);
-  const values = ['82.01.44.932', '01.14.16.007.381', '01.14.16.007.381.01.500', '01.14.16', 'abc', 'arbitrary cadastral / value', 'x'.repeat(80)];
+  const values = ['82.01.44.932', '01.14.16.007.381', '01.14.16.007.381.01.500', '01.14.16', '.', 'abc.', '.arbitrary cadastral / value', 'x'.repeat(80) + '.'];
   const targets = values.map(value => ({ type: 'cadastral', value }));
   for (const target of targets) {
     assert.equal(validateIdentifierInput(target.type, ` ${target.value} `), target.value);
@@ -84,9 +84,9 @@ test('cadastral codes accept any nonempty text, trim whitespace and reject dupli
   const page = await h.get('/new');
   assert.match(page, /placeholder="82\.01\.44\.932 or 01\.14\.16\.007\.381"/);
   assert.doesNotMatch(page, /Expected: like/);
-  assert.doesNotMatch(page.match(/<input[^>]+id="v-cadastral"[^>]*>/)[0], /maxlength|pattern=/);
-  for (const value of ['', '   ', '\t\n']) {
-    assert.throws(() => validateIdentifierInput('cadastral', value), /Invalid cadastral value; enter a nonempty value/);
+  assert.doesNotMatch(page.match(/<input[^>]+id="v-cadastral"[^>]*>/)[0], /maxlength/);
+  for (const value of ['', '   ', '\t\n', 'abc', '12345', '82,01,44,932', 'x'.repeat(80)]) {
+    assert.throws(() => validateIdentifierInput('cadastral', value), /Invalid cadastral value; expected at least one dot/);
     const response = await h.post('/track/add', { type: 'cadastral', value });
     assert.equal(response.status, 400);
     assert.doesNotMatch(await response.text(), /expected like/i);
@@ -94,10 +94,27 @@ test('cadastral codes accept any nonempty text, trim whitespace and reject dupli
   assert.deepEqual(await h.listed(), targets);
 });
 
+test('ID numbers accept digits of any length and reject punctuation and other characters', async t => {
+  const h = await start(t);
+  for (const value of ['', '   ', '123.456789', '123,456789', '123 456789', '123-456789', '+123456789', '1e9', '12345678a', '１２３', '123\n456']) {
+    assert.throws(() => validateIdentifierInput('id', value), /Invalid id value; expected digits only/);
+    assert.equal((await h.post('/track/add', { type: 'id', value })).status, 400, value);
+  }
+  assert.deepEqual(await h.listed(), []);
+  const targets = ['0', '00123', '123456789', '01234567890', '1'.repeat(80)].map(value => ({ type: 'id', value }));
+  for (const target of targets) {
+    assert.equal((await h.post('/track/add', target)).status, 303);
+    await h.app.idle();
+  }
+  assert.deepEqual(await h.listed(), targets);
+  const page = await h.get('/new');
+  assert.doesNotMatch(page.match(/<input[^>]+id="v-id"[^>]*>/)[0], /maxlength/);
+});
+
 test('invalid input, unknown types, duplicates and forged requests are rejected', async t => {
   const h = await start(t);
   const bad = [
-    ['cadastral', ''], ['id', '123'], ['id', '1234567890a'],
+    ['cadastral', ''], ['cadastral', '123'], ['id', '123.456789'], ['id', '1234567890a'],
     ['registration', '12'], ['registration', 'a b c d e f'], ['bogus', '123456789'], ['toString', 'x'],
   ];
   for (const [type, value] of bad) {
@@ -491,6 +508,20 @@ test('top navigation and visible tappable actions at 320px, 390px and desktop', 
     const page = await browser.newPage({ viewport: { width, height: 800 } });
     for (const path of ['/', '/new', '/settings', `/track/delete?type=id&value=${samples.id.value}`]) {
       await page.goto(h.app.url + path);
+      if (path === '/new') {
+        const cases = [
+          ['cadastral', '12345', false], ['cadastral', '82,01,44,932', false],
+          ['cadastral', '.', true], ['cadastral', 'abc.def', true], ['cadastral', 'x'.repeat(80) + '.', true],
+          ['id', '123.456789', false], ['id', '123,456789', false], ['id', '123 456789', false],
+          ['id', '123abc', false], ['id', '00123', true], ['id', '1'.repeat(80), true],
+        ];
+        for (const [type, value, expected] of cases) {
+          assert.equal(await page.locator(`#v-${type}`).evaluate((input, value) => {
+            input.value = value;
+            return input.checkValidity();
+          }, value), expected, `${type} browser validity for ${value}`);
+        }
+      }
       const m = await page.evaluate(() => {
         const nav = document.querySelector('nav.tabs').getBoundingClientRect();
         const header = document.querySelector('header').getBoundingClientRect();

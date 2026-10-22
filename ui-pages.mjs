@@ -122,7 +122,7 @@ export function newPage({ csrf, values = {}, error }) {
   const tabs = types.map(t => `<label for="t-${t}">${typeNames[t].en}<span>${typeNames[t].ka}</span></label>`).join('');
   const panes = Object.entries(typeNames).map(([type, n]) => `<section class="pane pane-${type}"><div class="card narrow"><h3>${n.en} <span class="muted">${n.ka}</span></h3>
 <form method="post" action="/track/add"><input type="hidden" name="_csrf" value="${csrf}"><input type="hidden" name="type" value="${type}">
-<label for="v-${type}">${n.en}</label><input class="big" type="text" id="v-${type}" name="value" required${type === 'cadastral' ? '' : ' maxlength="40"'} placeholder="${n.example}" value="${escapeHtml(values.type === type ? values.value : '')}" autocomplete="off" inputmode="${type === 'cadastral' ? 'text' : 'numeric'}">
+<label for="v-${type}">${n.en}</label><input class="big" type="text" id="v-${type}" name="value" required${type === 'registration' ? ' maxlength="40"' : ` pattern="${escapeHtml(identifierFormats[type].pattern.source)}"`} placeholder="${n.example}" value="${escapeHtml(values.type === type ? values.value : '')}" autocomplete="off" inputmode="${type === 'cadastral' ? 'text' : 'numeric'}">
 ${identifierFormats[type] ? `<div class="muted">Expected: ${identifierFormats[type].hint}</div>` : ''}
 <label for="l-${type}">Label (optional)</label><input type="text" id="l-${type}" name="label" maxlength="100" value="${escapeHtml(values.type === type ? values.label : '')}">
 <div class="form-actions"><button class="primary">Add and run baseline check</button></div></form></div></section>`).join('');
